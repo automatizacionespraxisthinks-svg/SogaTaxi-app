@@ -7,6 +7,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.location.Location
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
@@ -24,7 +27,10 @@ import io.socket.client.Socket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -48,6 +54,18 @@ class TurnoService : Service() {
     private var socket: Socket? = null
     private var candado: PowerManager.WakeLock? = null
     private var activo = false
+    private var latido: Job? = null
+
+    /** Al volver la red (wifi o datos), se reenvía la cola sin esperar al socket. */
+    private val alVolverLaRed = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            Diagnostico.evento("Volvió la red")
+            escena.launch {
+                Cola.vaciar()
+                Sesion.refrescar()
+            }
+        }
+    }
 
     /** Segundos entre envíos, en carrera y en espera; los dicta la API (`rules.positionSeconds`). */
     private var cadenciaCarrera = 2
@@ -74,6 +92,14 @@ class TurnoService : Service() {
             leerReglas()
             iniciarGps()
             conectarSocket()
+            getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(alVolverLaRed)
+            // Respaldo: cada 20 s, si quedó algo en la cola, se intenta otra vez.
+            latido = escena.launch {
+                while (isActive) {
+                    delay(20_000)
+                    if (Cola.hayDelConductor()) Cola.vaciar()
+                }
+            }
         }
         return START_STICKY
     }
@@ -137,7 +163,18 @@ class TurnoService : Service() {
             Diagnostico.lectura(if (punto.hasAccuracy()) punto.accuracy else null, pantalla)
             ultimaPosicion = punto.latitude to punto.longitude
 
-            val cadencia = (if (Prefs.rideId != null) cadenciaCarrera else cadenciaEspera) * 1000L
+            // Distancia a la recogida mientras va por el cliente: la pantalla
+            // dice cuánto falta y si ya puede marcar "Llegué".
+            val sesion = Sesion.flujo.value
+            val carrera = sesion.carrera
+            if (sesion.fase == Fase.CARRERA && sesion.estadoCarrera == EstadoCarrera.ASSIGNED && carrera?.tienePunto == true) {
+                val metros = FloatArray(1)
+                Location.distanceBetween(punto.latitude, punto.longitude, carrera.lat!!, carrera.lng!!, metros)
+                Sesion.acercarse(metros[0])
+            }
+
+            val rideId = Sesion.carreraEnCurso
+            val cadencia = (if (rideId != null) cadenciaCarrera else cadenciaEspera) * 1000L
             if (System.currentTimeMillis() - ultimoEnvio < cadencia) return
             ultimoEnvio = System.currentTimeMillis()
 
@@ -145,7 +182,7 @@ class TurnoService : Service() {
                 .put("point", JSONObject().put("lat", punto.latitude).put("lng", punto.longitude))
                 .apply {
                     if (punto.hasAccuracy()) put("accuracyMeters", punto.accuracy.toInt().coerceIn(0, 5000))
-                    Prefs.rideId?.let { put("rideId", it) }
+                    rideId?.let { put("rideId", it) }
                 }
             escena.launch {
                 // Una posición perdida no se reintenta: la siguiente llega en
@@ -181,9 +218,26 @@ class TurnoService : Service() {
             reconnectionDelayMax = 10_000
         }
         socket = IO.socket("${Prefs.apiBase}/rt", opciones).apply {
-            on(Socket.EVENT_CONNECT) { Diagnostico.socket(true) }
-            on(Socket.EVENT_DISCONNECT) { Diagnostico.socket(false) }
-            on(Socket.EVENT_CONNECT_ERROR) { Diagnostico.socket(false) }
+            on(Socket.EVENT_CONNECT) {
+                Diagnostico.socket(true)
+                // Al reconectar: lo que quedó en la cola y el estado real.
+                escena.launch {
+                    Sesion.enLinea(true)
+                    Cola.vaciar()
+                    Sesion.refrescar()
+                }
+            }
+            on(Socket.EVENT_DISCONNECT) {
+                Diagnostico.socket(false)
+                escena.launch { Sesion.enLinea(false) }
+            }
+            on(Socket.EVENT_CONNECT_ERROR) {
+                Diagnostico.socket(false)
+                escena.launch { Sesion.enLinea(false) }
+            }
+            // La oficina cambió algo de su carrera (la canceló, corrigió la
+            // dirección, la reasignó): se pide el estado real.
+            on("ride:changed") { escena.launch { Sesion.refrescar() } }
             on("ride:offer") { args ->
                 val json = args.firstOrNull() as? JSONObject ?: return@on
                 val oferta = runCatching { OfertaDeCarrera.deJson(json) }.getOrNull() ?: return@on
@@ -197,13 +251,15 @@ class TurnoService : Service() {
                 val motivo = (args.firstOrNull() as? JSONObject)?.optString("motivo").orEmpty()
                 escena.launch {
                     Diagnostico.evento("La oficina cerró el turno $motivo")
+                    Sesion.avisar("La oficina cerró tu turno. $motivo".trim())
+                    Sesion.refrescar()
                     detener()
                 }
             }
             on("session:closed") {
                 escena.launch {
                     Diagnostico.evento("Sesión cerrada desde otro celular o la oficina")
-                    Prefs.salir()
+                    Sesion.sesionCerrada("Tu sesión se cerró: entraste en otro celular o la oficina la cerró.")
                     detener()
                 }
             }
@@ -214,6 +270,8 @@ class TurnoService : Service() {
     private fun detener() {
         if (activo) Diagnostico.evento("Servicio de turno detenido")
         activo = false
+        latido?.cancel()
+        runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(alVolverLaRed) }
         ubicacion.removeLocationUpdates(alLeer)
         socket?.off()
         socket?.disconnect()
@@ -229,6 +287,7 @@ class TurnoService : Service() {
         if (activo) {
             // Android lo está matando sin que el conductor cerrara el turno.
             Diagnostico.evento("Android detuvo el servicio")
+            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(alVolverLaRed) }
             ubicacion.removeLocationUpdates(alLeer)
             socket?.off()
             socket?.disconnect()

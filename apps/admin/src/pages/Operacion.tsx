@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Bot, CarFront, Check, Inbox, Timer, TriangleAlert } from 'lucide-react';
+import { Bot, CarFront, Check, Inbox, Plus, Timer, TriangleAlert } from 'lucide-react';
 import type { Ride, RideStatus } from '@tax/shared';
 import { METAS, RIDE_STATUS_LABEL, RIDE_STATUS_TONE, diaEnPaipa, formatRelative } from '@tax/shared';
 import {
@@ -17,6 +17,7 @@ import {
   transition,
 } from '@tax/ui';
 import { MapCanvas } from '../components/MapCanvas';
+import { NuevaCarrera } from '../components/NuevaCarrera';
 import { RideCard } from '../components/RideCard';
 import { RideDetail } from '../components/RideDetail';
 import { actions, useLive } from '../live/store';
@@ -50,6 +51,7 @@ export function Operacion() {
   const drivers = useLive((s) => s.drivers);
   const pulseRideId = useLive((s) => s.pulseRideId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [creando, setCreando] = useState(false);
 
   const live = useMemo(
     () => rides.filter((r) => r.status !== 'COMPLETED' && r.status !== 'CANCELLED'),
@@ -85,6 +87,14 @@ export function Operacion() {
 
   return (
     <div className="space-y-4 p-5">
+      {puede('carreras.crear') ? (
+        <div className="flex justify-end">
+          <Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setCreando(true)}>
+            Nueva carrera
+          </Button>
+          <NuevaCarrera open={creando} onClose={() => setCreando(false)} />
+        </div>
+      ) : null}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         <Stat
           label="Carreras activas"

@@ -39,8 +39,13 @@ object Diagnostico {
 
     private val hora = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
-    fun evento(texto: String) = estado.update {
-        it.copy(eventos = (listOf("${hora.format(Date())}  $texto") + it.eventos).take(60))
+    fun evento(texto: String) {
+        // También al registro de Android: así se lee por USB (adb logcat -s
+        // SogaTaxi) aunque la pantalla en que está el conductor no lo muestre.
+        android.util.Log.i("SogaTaxi", texto)
+        estado.update {
+            it.copy(eventos = (listOf("${hora.format(Date())}  $texto") + it.eventos).take(60))
+        }
     }
 
     fun turnoIniciado() = estado.update {

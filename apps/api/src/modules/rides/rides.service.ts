@@ -45,6 +45,12 @@ const ORIGEN_EN_PALABRAS = {
   geocodificada: 'ubicada con Google',
 } as const;
 
+/**
+ * La «línea» de las carreras que registra la oficina desde el panel. No es
+ * una línea de WhatsApp: se guarda tal cual, y en Reportes sale aparte.
+ */
+export const LINEA_OFICINA = 'Oficina';
+
 export interface Actor {
   kind: TransitionActor;
   name: string;
@@ -126,6 +132,7 @@ export class RidesService {
    */
   private async lineaRegistrada(dicha: string | undefined): Promise<string | null> {
     if (!dicha) return null;
+    if (dicha === LINEA_OFICINA) return LINEA_OFICINA;
     const digitos = (texto: string | null) => (texto ?? '').replace(/\D/g, '').slice(-10);
     const buscada = dicha.trim();
     try {

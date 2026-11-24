@@ -14,16 +14,25 @@ android {
         // es el mínimo de los canales de notificación.
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0-fase0"
+        versionCode = 2
+        versionName = "0.2.0-fase2"
     }
 
     buildTypes {
         debug {
+            // Se conserva el de la fase 0 para que el APK de prueba ya
+            // instalado se actualice en su lugar y no quede una segunda app.
             applicationIdSuffix = ".fase0"
+            // La API de desarrollo en la red local; se puede cambiar en el acceso.
+            buildConfigField("String", "API_BASE", "\"http://192.168.1.3:3000\"")
+            buildConfigField("boolean", "API_EDITABLE", "true")
         }
         release {
             isMinifyEnabled = false
+            // PENDIENTE: el dominio de producción de la API de SogaTaxi. Solo
+            // HTTPS: la versión final no permite tráfico en texto plano.
+            buildConfigField("String", "API_BASE", "\"https://api.sogataxi.example\"")
+            buildConfigField("boolean", "API_EDITABLE", "false")
         }
     }
 
@@ -36,6 +45,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

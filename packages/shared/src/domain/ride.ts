@@ -322,6 +322,42 @@ export const createRideSchema = z.object({
 });
 export type CreateRideInput = z.infer<typeof createRideSchema>;
 
+/**
+ * Un celular colombiano como lo escribe una persona («300 123 4567»,
+ * «+57 300-123-4567», «573001234567») en el formato de la base: +57 y diez
+ * dígitos. Lo demás se deja como llegó para que lo rechace la validación.
+ */
+export function telefonoColombiano(texto: string): string {
+  const limpio = texto.replace(/[\s\-().]/g, '');
+  if (/^3\d{9}$/.test(limpio)) return `+57${limpio}`;
+  if (/^57\d{10}$/.test(limpio)) return `+${limpio}`;
+  return limpio;
+}
+
+/**
+ * Una carrera que la operadora registra desde el panel (24/11/2026): un
+ * cliente que llamó o llegó a la oficina. Es la misma carrera de WhatsApp
+ * —se despacha por oleadas y el conductor la acepta en su teléfono— pero sin
+ * lo que solo manda n8n (foto de Chatwoot, autorización por WhatsApp, línea).
+ * La API la marca con la línea «Oficina».
+ */
+export const crearCarreraOficinaSchema = z.object({
+  customerPhone: z
+    .string()
+    .transform(telefonoColombiano)
+    .pipe(z.string().regex(/^\+\d{8,15}$/, 'Escribe el celular del cliente, por ejemplo 300 123 4567')),
+  customerName: z.string().trim().min(2, 'Escribe el nombre del cliente').max(80),
+  pickup: rideAddressSchema,
+  dropoff: rideAddressSchema.optional(),
+  vehicleType: z.enum(VEHICLE_TYPES).default('sedan'),
+  passengers: z.coerce.number().int().min(1).max(8).default(1),
+  /** Varios taxis al mismo punto, como `cantidad` en el pedido de n8n. */
+  cantidad: z.coerce.number().int().min(1).max(MAX_CARRERAS_ACTIVAS).default(1),
+  pagoElectronico: z.boolean().default(false),
+  notes: z.string().trim().max(280).optional(),
+});
+export type CrearCarreraOficinaInput = z.input<typeof crearCarreraOficinaSchema>;
+
 export interface RideStatusEntry {
   from: RideStatus | null;
   to: RideStatus;

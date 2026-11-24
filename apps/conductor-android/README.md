@@ -1,8 +1,44 @@
-# SogaTaxi Conductor — app Android nativa (fase 0)
+# SogaTaxi Conductor — app Android nativa
 
-Prueba de concepto para decidir la migración de la PWA de conductores a una
-app nativa. **No reemplaza todavía a la PWA**: solo comprueba en teléfonos
-reales lo que la PWA no puede hacer.
+Reemplazo nativo de la PWA de conductores. La fase 0 comprobó en un OPPO
+con ColorOS 14 lo que la PWA no puede hacer: GPS con el teléfono bloqueado
+(24,6 min sin un hueco de más de 13 s) y ofertas que encienden la pantalla.
+La fase 2 la lleva a la par de la PWA.
+
+## Qué hace (fase 2)
+
+- **Una pantalla por estado**, como la PWA: acceso, fuera de turno, en turno
+  (esperando o en pausa), carrera y resumen (`Sesion.kt`, `Pantallas.kt`,
+  `PantallaCarrera.kt`).
+- **El estado sale de `GET /v1/driver/rides/me`** y se guarda en el teléfono:
+  abierta sin señal, la app vuelve a la carrera o al turno donde estaba. Un
+  401 no borra el token (suele ser una suspensión de la oficina).
+- **Carrera**: banda de color por estado (negro en camino, rojo en el lugar,
+  verde en curso), recogida, referencia, notas, foto del lugar, medio de
+  pago, distancia a la recogida, **Ir con Maps / Ir con Waze** (los mismos
+  enlaces que la PWA), **Llamar** al cliente, y la etapa siguiente en un
+  botón grande. "Finalizar" lleva la cuenta atrás del mínimo a bordo.
+- **Cancelar con motivo** (la lista de `cancelacion.ts`), solo antes de
+  recoger al cliente.
+- **Cola sin señal** (`Cola.kt`): las etapas (llegué, a bordo, finalizar) se
+  guardan y la pantalla avanza; se reenvían al reconectar el socket, al
+  volver la red o cada 20 s, con su clave de idempotencia. Aceptar,
+  cancelar, abrir/cerrar turno y cambiar de carro van directo.
+- **Vehículos permitidos** como botones al abrir turno, **cambiar de carro**
+  con el turno abierto y **cambiar de conductor** (no deja salir con etapas
+  sin enviar).
+- **Seguridad**: el token va cifrado con una llave del Keystore de Android
+  (`Cifrado.kt`). La versión final solo habla HTTPS; HTTP solo existe en la
+  de depuración (`src/debug/res/xml/network_security_config.xml`).
+
+## Pendiente
+
+- El **dominio de producción** de la API (`API_BASE` de `release` en
+  `app/build.gradle.kts`).
+- **FCM** como respaldo de las ofertas, cuando exista el proyecto de
+  Firebase de SogaTaxi.
+- **Actualizador propio** para la distribución privada, y la firma de la
+  versión final.
 
 1. **GPS con la pantalla bloqueada.** El turno abierto es un servicio en
    primer plano de tipo `location` (`TurnoService.kt`). Android no congela el
@@ -15,17 +51,6 @@ reales lo que la PWA no puede hacer.
 
 Usa **la misma API sin cambios**: `/v1/auth/driver`, `/v1/driver/shift/*`,
 `/v1/driver/position`, `/v1/driver/rides/*` y el socket `/rt`.
-
-## Qué queda fuera de la fase 0
-
-- **FCM.** Hace falta el proyecto de Firebase de SogaTaxi. Por ahora las
-  ofertas solo llegan con el turno abierto, que es justo cuando se ofrecen.
-  FCM será el respaldo para cuando Android mate el proceso.
-- La cola de etapas sin señal, la foto del cliente, el botón de Ir con
-  Maps/Waze, cambiar de carro y cancelar la carrera: todo eso es de la fase 2.
-- **Seguridad de producción.** Esta versión permite HTTP en texto plano para
-  hablar con la API de la red local (`network_security_config.xml`) y guarda
-  el token sin cifrar.
 
 ## Compilar
 

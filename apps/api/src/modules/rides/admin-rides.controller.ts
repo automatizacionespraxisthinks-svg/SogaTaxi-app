@@ -13,11 +13,11 @@ import {
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RIDE_STATUSES, pointSchema, type RideStatus } from '@tax/shared';
+import { RIDE_STATUSES, crearCarreraOficinaSchema, pointSchema, type RideStatus } from '@tax/shared';
 import { zodBody } from '../../common/zod.pipe';
 import { AppError } from '../../common/problem';
 import { RequierePermiso, SessionGuard } from '../identity/guards';
-import { RidesService, type Actor } from './rides.service';
+import { LINEA_OFICINA, RidesService, type Actor } from './rides.service';
 import { DispatchService } from '../dispatch/dispatch.service';
 import { FotosService } from './fotos.service';
 
@@ -60,6 +60,26 @@ export class AdminRidesController {
     private readonly dispatch: DispatchService,
     private readonly fotos: FotosService,
   ) {}
+
+  /**
+   * Una carrera registrada por la oficina (24/11/2026): el cliente llamó o
+   * llegó en persona. Pasa por la misma creación que las de WhatsApp
+   * —dirección resuelta con el catálogo o el geocodificador, municipio,
+   * cupo por teléfono, bitácora— y se despacha por oleadas: el conductor la
+   * recibe y la acepta igual que cualquier otra. Queda con la línea
+   * «Oficina» y con la operadora como actor.
+   */
+  @Post()
+  @RequierePermiso('carreras.crear')
+  crear(
+    @Req() request: FastifyRequest,
+    @Body(zodBody(crearCarreraOficinaSchema)) body: z.infer<typeof crearCarreraOficinaSchema>,
+  ) {
+    return this.rides.create(
+      { ...body, numeroEnPedido: 1, line: LINEA_OFICINA },
+      operator(request),
+    );
+  }
 
   @Get()
   list(@Query(zodBody(listQuerySchema)) query: z.infer<typeof listQuerySchema>) {

@@ -9,6 +9,7 @@ class App : Application() {
         super.onCreate()
         Prefs.init(this)
         crearCanales()
+        Sesion.iniciar(this)
     }
 
     private fun crearCanales() {

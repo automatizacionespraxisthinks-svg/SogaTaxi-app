@@ -72,7 +72,7 @@ describe('la fuerza orienta, no bloquea', () => {
   });
 
   it('nunca pasa de 1 si hay algún problema', () => {
-    expect(evaluatePassword('taxturistico es una empresa muy larga', PERSONA).fuerza).toBeLessThanOrEqual(1);
+    expect(evaluatePassword('sogataxi es una empresa muy larga', PERSONA).fuerza).toBeLessThanOrEqual(1);
   });
 
   it('se mantiene entre 0 y 4', () => {

@@ -27,6 +27,12 @@ export type AreaDePermiso = (typeof AREAS_DE_PERMISO)[number];
 
 export const PERMISOS = [
   {
+    clave: 'carreras.crear',
+    area: 'Operación',
+    nombre: 'Crear carreras',
+    descripcion: 'Registrar desde el panel la carrera de un cliente que llamó o llegó a la oficina; se despacha como las de WhatsApp.',
+  },
+  {
     clave: 'carreras.despachar',
     area: 'Operación',
     nombre: 'Relanzar y asignar carreras',
@@ -145,11 +151,12 @@ export function esPermiso(valor: string): valor is Permiso {
 }
 
 /**
- * Lo que podía hacer un operador antes de que hubiera roles editables. La
- * migración siembra el rol `operador` con esto, así que nadie pierde nada al
- * desplegar.
+ * Los permisos del rol `operador` recién desplegado: lo que podía hacer
+ * antes de que hubiera roles editables (la migración 0018 lo siembra con
+ * eso, así que nadie pierde nada) más `carreras.crear`, que le da la 0028.
  */
 export const PERMISOS_DEL_OPERADOR: Permiso[] = [
+  'carreras.crear',
   'carreras.despachar',
   'carreras.corregir',
   'carreras.cancelar',

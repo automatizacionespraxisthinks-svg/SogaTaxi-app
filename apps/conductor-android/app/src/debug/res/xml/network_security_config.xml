@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SOLO DEPURACIÓN: la API de desarrollo corre por HTTP en la red local
+     (http://192.168.1.3:3000) o por el túnel USB (http://localhost:3000).
+     La versión final usa src/main/res/xml, que no permite texto plano. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -143,9 +143,9 @@ object Ofertas {
         }
         escena.launch {
             try {
-                Api.post("/v1/driver/rides/$rideId/accept", idempotente = true)
-                Prefs.rideId = rideId
+                Api.post("/v1/driver/rides/$rideId/accept", idempotencia = Api.nuevaClave())
                 retirar(context, rideId, "Aceptó la carrera ${oferta.codigo}")
+                Sesion.refrescar()
                 alTerminar(null)
             } catch (e: Exception) {
                 retirar(context, rideId, "No se pudo aceptar: ${e.message}")
