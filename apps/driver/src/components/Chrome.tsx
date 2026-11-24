@@ -1,0 +1,189 @@
+import { useEffect } from 'react';
+import type { ReactNode } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
+import { CloudOff, Signal } from 'lucide-react';
+import { LiveDot, cn, transition } from '@tax/ui';
+import logo from '../assets/logo-sogataxi.png';
+
+/**
+ * Elementos fijos de la PWA.
+ *
+ * La barra superior es informativa y nunca interactiva: el conductor no
+ * tiene que buscar nada ahí mientras conduce. Va en tinta con la franja de
+ * marca arriba, y el `theme-color` del HTML es esa misma tinta para que la
+ * barra del celular la continúe.
+ */
+
+export function TopStatus({
+  online,
+  queued,
+  right,
+  notice,
+  onDismissNotice,
+  offlineHint,
+}: {
+  online: boolean;
+  queued: number;
+  right?: ReactNode;
+  /**
+   * Qué decir cuando no hay conexión, si lo de siempre no aplica. En la
+   * pantalla de acceso no hay nada encolado ni que encolar, así que prometer
+   * que «se envía al reconectar» sería mentira.
+   */
+  offlineHint?: string;
+  /** Aviso puntual: oferta perdida, GPS denegado, acción guardada. */
+  notice?: string;
+  onDismissNotice?: () => void;
+}) {
+  // El aviso se va solo: el conductor está conduciendo y no puede quedarse
+  // buscando dónde cerrarlo. Los largos (una acción que no se registró, por
+  // ejemplo) duran más: en 5 segundos no alcanza a leerlos de un vistazo.
+  useEffect(() => {
+    if (!notice || !onDismissNotice) return;
+    const id = window.setTimeout(onDismissNotice, Math.min(15_000, Math.max(5000, notice.length * 90)));
+    return () => window.clearTimeout(id);
+  }, [notice, onDismissNotice]);
+
+  return (
+    <header className="franja-marca flex h-12 shrink-0 items-center justify-between gap-3 border-b border-transparent bg-ink px-4">
+      <div className="flex items-center gap-3">
+        {/* La marca en pequeño, en todas las pantallas. Es decorativa para el
+            lector de pantalla: no dice nada que haga falta oír en cada una. */}
+        <img
+          src={logo}
+          alt=""
+          aria-hidden="true"
+          width={24}
+          height={24}
+          className="size-6 shrink-0 rounded-full bg-surface"
+        />
+        {/* Sobre tinta, los colores de estado claros: los de siempre no se leen. */}
+        <span
+          className={cn(
+            'flex items-center gap-2 text-caption',
+            online
+              ? 'text-success-on-ink [--tone-solid:var(--success-on-ink)]'
+              : 'text-legend-danger [--tone-solid:var(--legend-danger)]',
+          )}
+        >
+          <LiveDot live={online} />
+          {online ? 'Conectado' : 'Sin conexión'}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-2">{right}</div>
+
+      <AnimatePresence>
+        {notice ? (
+          <motion.button
+            key="notice"
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={transition.base}
+            onClick={onDismissNotice}
+            className="tone-warning absolute inset-x-0 top-12 z-30 bg-[var(--tone-bg)] px-4 py-2 text-left text-caption font-medium text-[var(--tone-ink)]"
+          >
+            {notice}
+          </motion.button>
+        ) : null}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {!online || queued > 0 ? (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={transition.base}
+            className={cn(
+              'absolute inset-x-0 top-12 z-20 flex items-center justify-center gap-2 px-4 py-2 text-caption font-medium',
+              online
+                ? 'tone-info bg-[var(--tone-bg)] text-[var(--tone-ink)]'
+                : 'tone-warning bg-[var(--tone-bg)] text-[var(--tone-ink)]',
+            )}
+          >
+            {online ? <Signal className="size-3.5" /> : <CloudOff className="size-3.5" />}
+            {online
+              ? `Enviando ${queued} ${queued === 1 ? 'acción guardada' : 'acciones guardadas'}…`
+              : offlineHint
+                ? `Sin conexión · ${offlineHint}`
+                : queued === 0
+                  ? 'Sin conexión · lo que marques se envía al reconectar'
+                  : `Sin conexión · ${queued} ${queued === 1 ? 'acción guardada' : 'acciones guardadas'}`}
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </header>
+  );
+}
+
+/**
+ * Contenedor de pantalla: una sola columna, respiro inferior para el pulgar.
+ *
+ * Los hijos no se encogen (`*:shrink-0`): si no caben, la pantalla hace
+ * scroll. Sin esto, un bloque con `overflow-hidden` —la foto del lugar— se
+ * aplastaba hasta quedar en una franja en cuanto la carrera no cabía en el
+ * celular, porque para el flex era el único que podía ceder altura.
+ */
+export function Screen({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <div
+      className={cn(
+        'flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-6 *:shrink-0',
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Zona de acciones fija al fondo: siempre en el mismo sitio, siempre a 64 px.
+ * Es un panel blanco con las esquinas de arriba redondeadas a 22 px.
+ */
+export function ActionBar({ children }: { children: ReactNode }) {
+  return (
+    <div className="shrink-0 space-y-2.5 rounded-t-[22px] border-t border-transparent bg-surface px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-4">
+      {children}
+    </div>
+  );
+}
+
+/** Dirección: el dato más grande de la pantalla, legible de un vistazo. */
+export function AddressBlock({
+  label,
+  text,
+  reference,
+  tone = 'accent',
+}: {
+  label: string;
+  text: string;
+  reference?: string;
+  tone?: 'accent' | 'neutral';
+}) {
+  return (
+    <div>
+      <p className="text-micro font-semibold uppercase tracking-[0.07em] text-ink-muted">{label}</p>
+      <p
+        className={cn(
+          'mt-1 text-[1.75rem] font-semibold leading-tight tracking-[-0.015em]',
+          tone === 'accent' ? 'text-ink' : 'text-ink-secondary',
+        )}
+      >
+        {text}
+      </p>
+      {reference ? <p className="mt-1.5 text-lg leading-snug text-ink-secondary">{reference}</p> : null}
+    </div>
+  );
+}
+
+export function DataRow({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 border-b border-line py-2.5 last:border-0">
+      <span className="text-base text-ink-muted">{label}</span>
+      <span className="text-lg font-medium text-ink">{value}</span>
+    </div>
+  );
+}

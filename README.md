@@ -1,0 +1,490 @@
+# Tax Turístico — primera versión de las interfaces
+
+Monorepo con las dos interfaces del producto y los contratos de dominio que
+comparten. Sigue la *Arquitectura técnica — Tax Turístico* (21 de octubre de
+2026): mismo stack de frontends (React 19 + Vite + TypeScript, pnpm
+workspaces), mismos estados, mismas reglas.
+
+Las tres piezas están conectadas: el panel y la PWA hablan con la API por
+HTTP y reciben los cambios por socket. Ya no queda nada simulado.
+
+## Qué hay
+
+| Paquete | Qué es |
+| --- | --- |
+| `apps/admin` | Panel de oficina: operación en vivo, carreras, flota, zonas, reportes, sistema |
+| `apps/driver` | PWA de conductores: una pantalla por estado, botones de 64 px, cola sin conexión |
+| `packages/ui` | Sistema de diseño: tokens, vocabulario de movimiento y componentes |
+| `packages/shared` | Dominio compartido: estados, tabla de transiciones, geometría, eventos |
+| `packages/tiles` | Genera el archivo PMTiles de Sogamoso desde OpenStreetMap |
+| `apps/api` | Monolito NestJS: API, despacho, outbox y tiempo real en un proceso |
+
+## Arrancar
+
+```bash
+pnpm install
+```
+
+Primero la base y la API, que es de quien viven las interfaces:
+
+```bash
+pnpm db:up && pnpm --filter @tax/api db:migrate && pnpm --filter @tax/api db:seed && pnpm dev:api
+```
+
+`pnpm db:up` levanta PostgreSQL 16 y Redis 7 en contenedores **solo para
+desarrollo**. En el VPS se reutilizan los que ya están, con usuario propio y
+prefijo de claves. El `seed` imprime una clave de API para n8n y crea un
+usuario de oficina y cinco conductores de prueba; detalles en
+[apps/api/README.md](apps/api/README.md).
+
+El mapa de Sogamoso es un archivo estático que se genera una vez:
+
+```bash
+pnpm build:tiles
+```
+
+Tarda unos minutos y produce unos 3 MB en `apps/admin/public/tiles/`. Sin él
+el panel funciona, pero el mapa aparece vacío con las instrucciones para
+generarlo. Detalles en [packages/tiles/README.md](packages/tiles/README.md).
+
+Después las dos interfaces:
+
+```bash
+pnpm dev
+```
+
+Panel en <http://localhost:5173> y PWA en <http://localhost:5174>. Para una
+sola, `pnpm dev:admin` o `pnpm dev:driver`.
+
+El panel pide correo y contraseña; la PWA, código de conductor y PIN (la placa se escribe al abrir el turno).
+Las credenciales de desarrollo las imprime el `seed`.
+
+```bash
+pnpm typecheck && pnpm build
+```
+
+## Identidad de marca SogaTaxi S.A.
+
+Un solo tema, claro, hecho con los colores del logo de SogaTaxi (Sogamoso):
+el amarillo del taxi guía la interfaz, el negro del aro escribe y enmarca, y el
+rojo y el verde de la franja dicen si algo pide atención o va bien. Todo el
+color vive en `packages/ui/src/styles/tokens.css`, en un solo bloque `:root`:
+los hexadecimales solo están ahí y ningún componente escribe un color a mano.
+Hasta el `theme-color` del HTML y los colores del manifiesto de la PWA se leen
+de ese archivo al compilar (`packages/ui/marca.vite.ts`).
+
+- **Amarillo con tinta encima.** El amarillo no deja leer texto blanco, así
+  que todo lo que va sobre él usa `text-on-brand` (negro). Para texto «de
+  marca» sobre blanco está `text-brand-ink`, un dorado oscuro que sí cumple
+  contraste; `--brand-strong` es el dorado de líneas y series de gráficas.
+  `text-on-accent` sigue siendo blanco: es el texto sobre rojo, verde o tinta.
+- **Paleta.** Los tokens de marca (`--ink`, `--brand`, `--on-brand`,
+  `--brand-ink`, `--success*`, `--danger*`, `--warning*`, `--bg`, `--surface`,
+  `--map-*`, `--legend-*`, `--plate`) y, debajo, la capa semántica que leen los
+  componentes (`--c-*`, `--t-*`). Para cambiar un color se toca la paleta,
+  nunca la capa de abajo.
+- **Sin tema oscuro.** No hay interruptor ni preferencia guardada, y
+  `color-scheme: light` hace que el modo oscuro del sistema no cambie nada.
+- **Tonos de estado.** Verde es bien o disponible, amarillo es en curso, naranja es
+  pausa y rojo es atención. Los estados de carrera y de conductor se mapean a un
+  tono en `packages/shared/src/domain/labels.ts`, así que el color de un estado
+  se decide una sola vez. El color sólido de cada estado vivo de una carrera
+  (naranja buscando taxi, negro en camino, rojo en el lugar, verde en curso) está
+  en `BANDA_DE_ESTADO`, en `packages/ui`: lo usan las columnas del tablero y
+  los botones de la PWA, así que «Aceptar» es naranja, «Llegué» negro,
+  «Pasajero a bordo» rojo y «Finalizar» verde. La HU-UI-01 dejaba el del lugar
+  en azul; la empresa lo pidió igual al panel.
+- **Tarjetas.** Blancas sobre el fondo gris cálido, separadas por sombra y no
+  por borde.
+- **Tipografía.** Atkinson Hyperlegible 400 y 700, servida desde la propia app
+  con `font-display: swap` y precacheada en la PWA: el conductor la ve aunque
+  su celular tenga otra fuente y aunque no tenga señal. Números tabulares en
+  todo dato que se actualiza.
+- **Logo.** El original está en `packages/ui/src/assets/logo-sogataxi.png`:
+  un PNG de 1019 px con fondo transparente, recortado del sello circular que
+  entregó la empresa. Los íconos de la PWA, los favicon y los logos del panel
+  y de la PWA salen de él con `node apps/driver/scripts/generar-iconos.mjs`.
+  Si llega el vector, se exporta a 1024 px y se vuelve a correr.
+- **Acceso del panel.** El logo oficial a 64 px y la franja de marca (amarillo, rojo y verde) arriba de
+  la pantalla y de la tarjeta, igual en las cuatro pantallas previas al panel
+  (acceso, cambio de contraseña, alta del segundo factor y códigos de
+  respaldo).
+- **Gráficas.** Colores de serie en orden fijo (dorado, verde, naranja), nunca
+  ciclados. El rojo no entra en el orden: lo lleva a mano la serie que mide
+  algo fuera de objetivo, como el p95.
+
+## Movimiento definido
+
+`packages/ui/src/motion.ts` es el vocabulario completo. Cinco duraciones
+(90 / 150 / 240 / 380 / 560 ms) y cuatro curvas; nada fuera de esa tabla.
+
+- Entrar es más lento que salir: aparecer se nota, desaparecer no estorba.
+- Solo se animan `opacity` y `transform`.
+- El movimiento informa: la dirección dice de dónde viene algo. En la PWA, las
+  pantallas entran por la derecha al avanzar en la carrera y por la izquierda
+  al retroceder.
+- Un solo elemento viaja entre posiciones en vez de dos parpadeos: el fondo de
+  la sección activa en la barra lateral, el del control segmentado, el
+  subrayado de las pestañas.
+- Lo que está pasando ahora late (halo que se expande y se apaga); lo que
+  acaba de cambiar destella una vez.
+- `MotionConfig reducedMotion="user"` más un bloque
+  `prefers-reduced-motion` en CSS: la app funciona entera sin una sola
+  animación.
+
+## Reglas del dominio que ya están implementadas
+
+El panel no inventa acciones: cada botón sale de la tabla de transiciones.
+
+- **Máquina de estados** (`domain/ride.ts`): los ocho estados de la carrera y
+  las transiciones permitidas con su actor y su condición. `transitionsFrom()`
+  es lo que decide qué acciones ve el operador.
+- **Oleadas**: radio, número de candidatos y vencimiento por zona, en
+  *Zonas*. **Suman, no reemplazan** (3/11/2026): quien recibió la carrera en
+  una oleada y no contestó la sigue teniendo en las siguientes, con el plazo
+  alargado; con dos candidatos en la 1 y tres en la 2, la oleada 2 son cinco.
+  Tras la tercera, la ronda final a todos los disponibles, con los de antes
+  dentro, y solo al agotarse vencen todas las ofertas juntas. Nadie en el
+  radio se queda fuera por tener el GPS viejo (teléfono bloqueado): entra
+  igual, y solo cuenta para el orden si el cupo no alcanza. Prueba:
+  `src/test/e2e-oleadas-acumuladas.ts`.
+- **ETA sin servidor de rutas**: distancia en línea recta × factor de
+  tortuosidad de la zona, como fija el ADR-08.
+- **Sin precios**: la empresa no maneja tarifas desde el sistema. Ni la PWA,
+  ni el panel, ni los informes muestran dinero; la API no calcula ninguno y
+  `POST /v1/quotes` ya no existe. La tabla `fare_rules` se conserva solo como
+  histórico de las carreras viejas.
+- **Mínimo a bordo** (`MIN_DURACION_CARRERA_MIN`, diez minutos por defecto):
+  «Finalizar» queda bloqueado en la PWA con una cuenta atrás, y la API lo
+  rechaza con `RIDE_TOO_SHORT` si alguien se lo salta. El número vive solo en
+  el entorno de la API: la PWA lo pide al abrir, así que cambiarlo no obliga a
+  recompilarla, y con `0` la restricción queda desactivada. La oficina sí
+  puede cerrar antes.
+- **Datos personales, Ley 1581 de 2012** (17/11/2026, migración 0022):
+  - **Aviso y autorización.** El flujo de atención agrega al final del primer
+    mensaje de cada solicitud un aviso de privacidad fijo (`avisoPrivacidad`
+    en el nodo Config; el modelo no lo escribe). Seguir escribiendo después
+    de leerlo es la autorización (conducta inequívoca, Decreto 1377 art. 7).
+    `crear_carrera` manda `consent: { version, channel }`, y la API la guarda
+    en el cliente con la hora del servidor la primera vez o cuando cambia
+    `politicaVersion`. Sin aviso configurado no se manda ni se guarda.
+  - **Consulta y supresión.** *Sistema › Datos personales* (permiso
+    `clientes.datos`, solo administradores por defecto): buscar por teléfono,
+    descargar todo lo que el sistema guarda del cliente y suprimirlo. Suprimir
+    borra teléfono, nombre, direcciones, notas y fotos; las carreras quedan en
+    las cifras con la recogida redondeada a ~1 km, y la autorización se
+    conserva como prueba. No se puede con una carrera abierta. Las dos
+    acciones quedan en la bitácora, sin el teléfono completo. La conversación
+    en Chatwoot y la memoria del agente en n8n se borran allá.
+  - Flujos: `Flujos/Principales/Actualizados 2026-11-17`. **Antes de
+    importarlos, la empresa tiene que publicar su política de tratamiento y
+    poner el enlace en `politicaUrl`** del nodo Config (sin enlace, el aviso
+    sale sin él). Prueba: `src/test/e2e-datos-personales.ts`.
+- **PWA sin señal** (17/11/2026, auditoría):
+  - **La cola solo guarda las etapas** de una carrera suya (llegué, a bordo,
+    finalicé). Aceptar una oferta y abrir, cerrar o pausar el turno van
+    directo: sin señal se le dice al conductor y no avanza la pantalla. Antes
+    un «Aceptar» sin señal lo mandaba a buscar a un cliente que no era suyo.
+  - **La cola reintenta lo pasajero** (sin red, tiempo agotado, 5xx de un
+    despliegue, 429), se para ante un 401 sin borrar nada, y si el servidor
+    rechaza una acción se lo dice al conductor en vez de dejarlo en la
+    consola. Cada acción lleva clave de idempotencia y es del conductor que la
+    hizo: «Cambiar conductor» no deja pasar la de uno al otro, y no cierra la
+    sesión con acciones sin enviar.
+  - **Las peticiones tienen 12 s de tope**, y los botones de etapa dicen
+    «Enviando…» y no aceptan un segundo toque.
+  - **Abrir sin señal** muestra lo último que se supo (su carrera, su turno)
+    en vez de «Entrar», y se recupera solo al volver la red.
+  - **Versión nueva**: la app la busca cada 30 min y al volver al frente, y se
+    recarga sola en un momento seguro (sin oferta ni carrera en pantalla).
+  - El radio de «Llegué» viene de la API (`rules.arrivalRadiusMeters`), la
+    oferta suena (Web Audio, sin archivo), el reloj del turno avanza, la
+    suscripción push se vuelve a registrar al recuperar un turno, y se puede
+    hacer zoom.
+- **Cambiar de carro o de conductor** (17/11/2026, migración 0021): un
+  carro lo manejan varios conductores y un conductor maneja varios carros,
+  muchas veces con el mismo celular.
+  - El acceso a la PWA es **código + PIN**: dice quién es. El carro se elige
+    al abrir el turno. (`POST /v1/auth/driver` acepta todavía `plate`, y la
+    ignora, para que una PWA vieja siga entrando.)
+  - **Cambiar carro** (`POST /v1/driver/shift/switch`): el mismo conductor,
+    con la misma sesión, cierra el turno del carro de antes y abre el del
+    nuevo. Lo que puede fallar se comprueba antes de cerrar nada.
+  - **Cambiar conductor** (`POST /v1/driver/logout`): se cierra el turno y la
+    sesión de ese celular y se le borra el push; el compañero entra con su
+    código y su PIN. Si entra sin que el primero haya salido, la sesión y el
+    push del primero en ese celular se revocan igual.
+  - Ninguno de los dos con una carrera asignada o en curso (`DRIVER_BUSY`).
+  - **Un conductor, un celular activo**: entrar en otro teléfono cierra la
+    sesión del anterior y le borra el push. El celular que se queda sin
+    sesión (por esto, porque otro conductor entró en él o porque la oficina
+    lo revocó) recibe `session:closed` por el socket, que además se corta, y
+    la PWA vuelve al acceso diciendo por qué. La migración 0021 deja a cada
+    conductor con el último celular que usó. En la ficha, «Celular activo» y
+    debajo los anteriores, en gris.
+  - La bitácora anota cada paso del conductor con la placa en el texto:
+    «Entró en un celular», «Abrió turno en el móvil UBP472», «Cambió de
+    carro: del móvil UBP472 al TQR118», «Cerró turno en el móvil TQR118».
+    El cierre por relevo (otro toma el carro con el turno abierto) no se
+    anota.
+  - Cualquier móvil activo sirve. Si el listado maestro no vincula al
+    conductor con ese móvil, el turno se abre igual con `fuera_de_listado`,
+    Flota lo muestra («Móvil fuera de su listado») y queda en la bitácora. Un
+    móvil sin nadie en el listado no se marca.
+
+  Prueba: `src/test/e2e-cambio-de-mano.ts`.
+- **Varios taxis en un pedido** (11/11/2026): «5 taxis en la terminal» es
+  una sola llamada a `POST /v1/rides` con `cantidad: 5`, y la API crea las
+  cinco carreras juntas o ninguna si no caben en el tope de 5 por teléfono
+  (detalle en [apps/api/README.md](apps/api/README.md)). Los flujos de n8n de
+  `Flujos/Principales/Actualizados 2026-11-11` van con esto:
+  - *Atención*: `crear_carrera` pide por punto con `cantidad`; lo acordado y
+    aún sin pedir («5 taxis, efectivo, falta el punto») se guarda en Redis
+    (`tax:n8n:pedido:<conversación>`, una hora) y vuelve al agente como
+    «Pedido en curso», para que no lo olvide entre turnos; y si el mensaje
+    del agente dice un número de taxis distinto de los que de verdad se
+    crearon, se reemplaza por uno armado con las carreras creadas.
+  - *Avisos*: cada taxi del grupo se avisa por separado con su número
+    («Taxi 2 de 5 – terminal») al asignarse, al llegar, al cancelarse y al
+    terminar.
+
+  Hay que desplegar la API antes de importar los flujos: la API vieja ignora
+  `cantidad` y crearía un solo taxi. Prueba:
+  `src/test/e2e-varios-taxis.ts`.
+- **El conductor cancela** (5/11/2026, migración 0020): por una causa
+  mayor y solo antes de recoger al cliente (asignada o con «Llegué»; con el
+  pasajero a bordo la API lo rechaza). La PWA pide confirmación y un motivo
+  de la lista (falla mecánica, accidente, emergencia, el cliente no aparece u
+  otro, y con «Otro» hay que escribir qué pasó). La carrera guarda quién la
+  canceló (`cancelled_by`, para todas, también las viejas desde la bitácora)
+  y la clave del motivo (`cancel_code`); la bitácora lleva su nombre y dónde
+  estaba, el panel recibe un aviso rojo con alarma, y Reportes, el Excel y el
+  PDF cuentan las canceladas por el conductor, en general y por cada uno, con
+  los motivos agrupados por quién canceló. El evento `ride.cancelled` lleva
+  `cancelledBy: 'driver'` y `code`. Prueba:
+  `src/test/e2e-cancelacion-del-conductor.ts`.
+- **Foto del lugar**: el cliente la manda por WhatsApp y n8n la entrega con la
+  carrera (`pickupPhotoUrl`) o después (`POST /v1/rides/:id/photo`, el archivo
+  o un enlace). El conductor la ve mientras va a recogerlo, la oficina en la
+  ficha, y se borra a los 30 días.
+- **Al aceptar**, el evento `ride.assigned` lleva `driver: { code, name,
+  plate }`, y la carrera guarda el taxi con el que va.
+- **Reportes como tablero**: una sola consulta (`GET /v1/reports/dashboard`)
+  con periodo por días de Paipa (hasta 93), sectores y líneas de opción
+  múltiple, urbano o veredas y conductor de opción única, y «No incluir
+  pruebas». Trae el resumen en palabras, las cifras contra las metas de
+  `METAS`, las gráficas y una fila por conductor con ofertas y horas de turno;
+  con un conductor elegido, lo compara con el grupo. Los filtros viven en la
+  dirección de la página, y el Excel y el PDF salen con los mismos.
+- **Pruebas fuera de las cifras**: un teléfono (desde la ficha de una de sus
+  carreras) o una cuenta de conductor (desde *Flota*) se marcan como de
+  prueba, y con «No incluir pruebas» Reportes deja fuera todo lo suyo, también
+  lo de antes de marcarlo.
+- **Zonas y lugares desde el panel**: en *Zonas*, una ventana sobre la vista
+  crea zonas (círculos que no pueden montarse sobre otra; solo
+  administradores) y lugares del catálogo con sus palabras clave, como los
+  nombran los clientes. Una carrera sin ubicación compartida se ubica así:
+  con nomenclatura («Calle 25 #18-40») primero el geocodificador; sin ella
+  («frente a la terminal») primero el catálogo, y queda con `pickup_source =
+  'catalogo'`. Las oleadas de cada zona ya se guardan de verdad. Prueba:
+  `src/test/e2e-catalogo.ts`.
+- **Ubicar la recogida** (revisado el 3/11/2026, migración 0019), por orden
+  de confianza:
+  1. *Ubicación o enlace de mapa*: el punto exacto. Se leen los enlaces de
+     Google (`?q=`, `!3d!4d`, `/maps/search/lat,+lng`, `@`), Waze, Apple y
+     `geo:`; los cortos de `maps.app.goo.gl` los abre n8n antes.
+  2. *Dirección escrita*: Google Geocoding, pero solo si encontró **el sitio**:
+     se rechaza la coincidencia parcial (una dirección que no existe tal
+     cual), la calle entera, el barrio o el municipio, y otra vía («Calle 19»
+     cuando se pidió «Carrera 19»). La caché pasó a `geo:q2:` para no
+     reutilizar respuestas del filtro viejo.
+  3. *Señas y palabras clave*: el catálogo de lugares. **Sin lugares en el
+     catálogo no reconoce ninguna seña.** La búsqueda no es estricta
+     (5/11/2026): compara palabra por palabra sin artículos ni preposiciones
+     («terminal» a secas encuentra «el terminal»; «terminal buses», «terminal
+     de buses»), perdona un error de escritura en las palabras de 5 a 9 letras
+     y dos desde 10, siempre con la primera y la última letra iguales
+     («terminl», «hopital»; no «termina» ni «hostal»), y un nombre con
+     paréntesis vale sin ellos. Las palabras de 4 letras o menos y las que
+     llevan números tienen que ser exactas. Por eso dos palabras clave con el
+     mismo núcleo («la terminal» y «terminal») no pueden ser de dos lugares. Para cargar muchos de una
+     vez: `cli/generar-sql-lugares.ts` convierte un GeoJSON en un SQL con las
+     mismas reglas del panel (zona, palabras únicas) que se ejecuta en la base.
+  4. *Nada de lo anterior*: la carrera se crea `sin_ubicar` y se despacha
+     desde el centro de la zona marcada como **punto de partida** (el Centro
+     al migrar; se cambia en *Zonas › Editar*). Antes era «la primera zona
+     urbana» sin orden fijo, y en producción salía Lago Sochagota. El panel
+     no la pinta en el mapa y la ficha lo avisa, y el agente de n8n le pide
+     la ubicación al cliente (flujo «Actualizados 2026-11-03»).
+- **Listado maestro**: `cli/importar-listado-maestro.ts` carga el Excel de la
+  empresa (hoja «Taxis»): móviles con su número interno, ficha y propietario
+  (cédula cifrada), conductores y relevadores con licencia y restricción, y
+  quién maneja cada uno (`vehicle_drivers`). Simula por defecto; con
+  `--aplicar` guarda y reparte PIN. Se repite cada mes sin duplicar: a la
+  persona se la reconoce por `document_hash`, un HMAC de la cédula. Cómo
+  correrlo en el servidor: DESPLIEGUE §4.4. Pruebas: `listado-maestro.spec.ts`
+  y `e2e-listado-maestro.ts`, con un Excel de mentira. Para cargarlo desde un
+  cliente de PostgreSQL, `cli/generar-sql-listado-maestro.ts` convierte el
+  Excel en un `.sql` equivalente: huella HMAC calculada en Postgres con la
+  clave que pega quien lo ejecuta, PIN ya hasheados con Argon2 y la entrada
+  de la bitácora encadenada igual que la API.
+- **Outbox**: estados de entrega, reintentos y cola muerta. Ya no se ven en el
+  panel —la empresa dejó *Sistema* con solo Usuarios y Auditoría—, pero
+  la API reintenta igual, `/status` cuenta la cola muerta y
+  `GET /v1/admin/outbox` sigue disponible.
+- **Líneas de WhatsApp vigiladas**: un monitor pregunta a WAHA cada minuto.
+  Una caída clara (FAILED, STOPPED, pide QR, la sesión desapareció) alerta en
+  el acto; una dudosa (STARTING, WAHA sin contestar) solo si se repite en la
+  revisión siguiente, porque un reinicio de WAHA pasa por ahí en segundos y
+  alertaría de una caída y una vuelta cada vez. La lógica está aparte, en
+  `waha-monitor.ts`, con sus pruebas.
+- **Exportaciones a Excel y PDF**: las genera una cola en segundo plano
+  (`exportaciones`), se guardan en la base siete días y el panel las descarga
+  solas al terminar. El Excel del periodo trae todas las carreras y las tablas
+  por conductor, zona, día y hora; el PDF es el resumen para imprimir; desde
+  *Carreras* se exporta lo que se está viendo, con sus filtros. Horas y fechas
+  en hora de Paipa. Prueba: `src/test/e2e-exportaciones.ts`.
+- **Usuarios desde el panel**, hasta cinco activos sin contar
+  administradores: contraseña temporal de 72 horas que se muestra una vez, y
+  al entrar, primero el cambio de contraseña y después el segundo factor, los
+  dos impuestos por el servidor.
+- **Roles y permisos** (*Sistema › Roles y permisos*, migración 0018): un rol
+  es un nombre con permisos de un catálogo de 14 (`@tax/shared`,
+  `PERMISOS`), y la API pide el permiso en cada endpoint, no el rol. Ver la
+  operación es de todos. `administrador` (todo, no se edita) y `operador` (lo
+  que podía hacer antes) son de base; se pueden crear otros. Reglas: nadie da
+  permisos que no tiene ni gestiona a quien tiene más que él, nadie se cambia
+  su propio rol, siempre queda un administrador activo, y dar un rol o cambiar
+  permisos pide el código del teléfono aunque la sesión esté abierta (cinco
+  códigos mal cierran la sesión). Prueba: `src/test/e2e-roles-y-permisos.ts`.
+- **Geocodificador a la vista** (4/11/2026): una píldora arriba, junto a las
+  líneas de WhatsApp, dice si Google está ubicando direcciones («Direcciones ·
+  Google», «sin Google», «Google rechaza la clave»), con letrero rojo si deja
+  de funcionar y, al tocarla, la última prueba, lo de hoy y «Probar ahora»
+  (`GET /v1/admin/system/geocodificador`, `POST …/probar`). La API prueba la
+  clave al arrancar y cada carrera deja en el registro de dónde salió su punto
+  (`pickupSource`) y, si no se ubicó, por qué (`google: sin_clave`,
+  `rechazada`, `descartada`…). Un rechazo de Google ya no se guarda en la
+  caché como «no existe».
+- **Página de estado sin textos fijos**: PostgreSQL, Redis, los webhooks de
+  n8n, WAHA y la clave de API se comprueban en cada consulta, y la memoria
+  se compara con el límite real del contenedor.
+- **Privacidad**: el conductor no ve el teléfono del cliente hasta aceptar; el
+  GPS solo existe con turno abierto.
+- **Posición en vivo** (`POSITION_REPORT_RIDE_SECONDS` y
+  `POSITION_REPORT_IDLE_SECONDS`, dos segundos por defecto): la PWA manda su
+  punto a esa cadencia y la API lo reparte al panel por el socket
+  (`driver:moved`), así que es el ritmo al que se mueven los taxis en el mapa.
+  Guardar el recorrido va aparte (`POSITION_SAMPLE_*`, 10 s en carrera y 30 s
+  en espera): el mapa va en vivo sin que el histórico crezca con él. La PWA
+  recibe la cadencia en `/me`, así que se cambia solo en el entorno de la API.
+  Con la aplicación cerrada no hay posición —la web no puede leer el GPS sin
+  página viva, ni existe un permiso «siempre»—, así que la pantalla se
+  mantiene encendida mientras haya turno abierto y el reporte se pone al día
+  en cuanto el conductor vuelve a la aplicación.
+- **Pago electrónico**: cada conductor dice si lo recibe (`drivers.
+  acepta_pago_electronico`, desde la ficha en *Flota*) y cada carrera si el
+  cliente paga así (`rides.pago_electronico`). Es un filtro más del despacho,
+  como el tipo de vehículo: las oleadas y sus radios por zona son los mismos,
+  solo que entre los que lo reciben. Si nadie con pago electrónico la toma,
+  queda «sin asignar» sin abrirse a los demás; la oficina, o n8n, le pregunta
+  al cliente si puede pagar en efectivo, la cambia (`PATCH …/payment`) y la
+  relanza. La asignación manual respeta la misma regla. El conductor ve el
+  medio de pago en la oferta y en la carrera. Prueba: `e2e-pago-y-suspension.ts`.
+- **Sin destino en la PWA**: el cliente casi nunca lo dice al pedir, y en la
+  pantalla del conductor se confundía con la dirección de recogida. Se sigue
+  guardando si llega, y el panel lo muestra.
+- **Suspensión con fecha**: además de desactivar, la oficina puede suspender a
+  un conductor por unos días con un motivo (reglamento interno). Mientras dura
+  no entra en las oleadas, no entra a la PWA —al intentarlo ve hasta cuándo— ni
+  abre turno; si estaba en turno se le cierra, y si llevaba una carrera la
+  termina y el turno se le cierra al finalizarla. Al cumplirse vuelve solo, sin
+  que nadie tenga que reactivarlo.
+- **Un carro, varios conductores**: la placa se repite entre el conductor y
+  sus relevadores. Dar de alta un conductor con una placa existente lo vincula
+  a ese móvil; en el listado maestro, las filas con la misma placa se juntan en
+  un solo móvil. Y si quien entrega el carro olvidó cerrar su turno, el que lo
+  recibe lo abre igual: el turno anterior se cierra solo (relevo) y a ese
+  teléfono le llega el aviso, salvo que el carro esté en plena carrera.
+
+## Contrato con n8n: pago electrónico y ubicación
+
+Los flujos no viven en este repositorio. Su versión integrada con esto está
+en `Flujos/Principales/Actualizados 2026-10-30` (carpeta de la empresa). Lo
+que usan de la API:
+
+1. **Medio de pago.** `POST /v1/rides` con `"pagoElectronico": true` o
+   `false`, booleano. Sin el campo se toma efectivo, así que un flujo viejo
+   sigue funcionando. Viene en `ride.created`, `ride.assigned` y
+   `ride.no_driver`.
+2. **Enlace de ubicación.** `pickup.link` (en `POST /v1/rides` y en
+   `PATCH …/address`) es el enlace tal como lo mandó el cliente. La carrera
+   lo guarda (`pickup_link`) y «Ir con Maps» del conductor lo abre; «Ir con
+   Waze» va al mismo punto. Si no viene `pickup.point`, el punto se lee del
+   enlace. Solo cuentan enlaces de mapas (Google, `maps.app.goo.gl`, Waze,
+   Apple, OpenStreetMap): otro se ignora. Si la ubicación cae a menos de 60 m
+   de un lugar del catálogo, su nombre va delante de la dirección.
+3. **Sin taxis con pago electrónico.** `ride.no_driver` con
+   `pagoElectronico: true`: se le pregunta al cliente si puede pagar en
+   efectivo y, si acepta, `PATCH /v1/rides/:id/payment` con
+   `{ "pagoElectronico": false, "relanzar": true }` cambia y relanza en una
+   llamada. Solo con la carrera sin asignar (`INVALID_TRANSITION` si no).
+4. **Asignación manual** (`POST /v1/rides/:id/assign`) responde
+   `DRIVER_NO_ELECTRONIC_PAYMENT` o `DRIVER_SUSPENDED` si el conductor no
+   cumple la regla.
+5. **`PATCH …/address`** acepta también el cuerpo envuelto en `pickup`, como
+   lo mandaba el flujo hasta octubre de 2026 (antes respondía
+   `VALIDATION_FAILED`). Prueba: `src/test/e2e-enlace-de-ubicacion.ts`.
+
+## Cómo se mantienen al día las pantallas
+
+El reparto es deliberado, y es lo que hace que el panel aguante una señal
+mala sin mentir:
+
+- **El socket avisa** de que algo cambió y la pantalla responde al momento,
+  sin esperar a nadie.
+- **La API es la verdad.** Tras cada aviso, y al reconectar, el panel vuelve
+  a pedir el estado completo.
+
+Si el socket se pierde un evento —y en señal rural se pierde—, el refresco lo
+corrige. Al revés, fiarlo todo al socket, deja a la oficina mirando datos
+viejos sin saber que lo son.
+
+La PWA hace lo mismo y añade una cola: una acción marcada sin cobertura se
+guarda y se reenvía al volver la señal, porque el conductor no puede quedarse
+esperando en mitad de una vereda.
+
+## Lo que falta
+
+Web Push y el TOTP de la oficina ya están, los dos probados de extremo a
+extremo. Del segundo factor queda sin comprobar en un teléfono real solo la
+mitad que vive en el navegador de los avisos push, porque el navegador de
+pruebas deniega las notificaciones.
+
+Pendiente de las siguientes fases, en orden:
+
+1. **Cola sin conexión**: ya funciona sobre `localStorage`; pasa a IndexedDB
+   el día que haya que encolar fotos y no solo comandos.
+2. **Chatwoot** tras la capa anticorrupción (de WAHA ya se vigilan las
+   líneas y se trae el QR).
+3. **Retención de las demás tablas de §9.3**: fotos del lugar, conversaciones
+   de Chatwoot y el archivado a cinco años. El histórico de GPS ya se purga
+   solo, de madrugada y por lotes.
+
+## Decisiones tomadas en esta versión
+
+- **Tailwind v4 con tokens en `@theme`** en vez de shadcn/ui completo. Los
+  componentes son propios y pequeños; la base (Tailwind + utilidades) es la
+  misma que pide shadcn/ui, así que añadir sus componentes después no obliga a
+  reescribir nada.
+- **Gráficas en SVG propio** en vez de Apache ECharts. Son cuatro formas
+  sencillas, pesan unos pocos KB y se controla cada detalle de color,
+  interacción y tabla equivalente. Si los reportes crecen, ECharts sigue siendo
+  la opción del documento.
+- **Escritor de PMTiles propio.** El paquete `pmtiles` de npm solo lee y el
+  escritor oficial es un binario de Go; implementarlo deja el pipeline del
+  mapa corriendo con `pnpm`, sin herramientas que instalar aparte. Se valida
+  con el lector oficial, que es el que usará el navegador.
+- **Estilo de mapa propio** en vez de uno de terceros: el mapa usa los tokens
+  del sistema de diseño, así que cambia con el tema y no parece una isla
+  visual dentro del panel.

@@ -1,0 +1,932 @@
+import { randomBytes } from 'node:crypto';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { and, eq, inArray, isNull, ne, or, gt, lt, sql } from 'drizzle-orm';
+import { uuidv7 } from 'uuidv7';
+import { DB, type Database } from '../../db/db.module';
+import { apiKeys, driverDevices, drivers, rides, roles, sessions, userRecoveryCodes, users } from '../../db/schema';
+import { AppError } from '../../common/problem';
+import {
+  decryptColumn,
+  encryptColumn,
+  hashSecret,
+  randomHex,
+  randomToken,
+  sha256Hex,
+  verifySecret,
+} from '../../common/crypto';
+import { base32Decode, generateTotpSecret, otpauthUri, verifyTotp } from '../../common/totp';
+import { loadEnv } from '../../config/env';
+import {
+  ACTIVE_RIDE_STATUSES,
+  evaluatePassword,
+  finDeSuspension,
+  normalizeLogin,
+  permisosDelRol,
+  sigueSuspendido,
+  type Permiso,
+} from '@tax/shared';
+import { AuditService } from '../audit/audit.service';
+
+/** Intentos fallidos antes de bloquear y cuánto dura el bloqueo. */
+export const INTENTOS_POR_CELULAR = 5;
+export const MINUTOS_DE_BLOQUEO = 15;
+const INTENTOS_DE_USUARIO = 5;
+/**
+ * Tope de la cuenta del conductor, por encima del de cada celular: solo
+ * salta si alguien prueba PIN desde muchas redes a la vez.
+ */
+const TOPE_CUENTA_CONDUCTOR = 20;
+
+/** Lo único que dice el acceso del conductor cuando no entra, sea cual sea la causa. */
+export const MENSAJE_ACCESO_CONDUCTOR =
+  'Código o PIN incorrectos. Tras varios intentos el acceso se pausa 15 minutos; si no recuerdas el PIN, llama a la oficina.';
+
+/** Un hash Argon2 de nada, para que un código inexistente tarde lo mismo que uno real. */
+let falso: Promise<string> | undefined;
+function hashFalso(): Promise<string> {
+  falso ??= hashSecret(`no-existe-${Math.random()}`);
+  return falso;
+}
+
+export interface ApiPrincipal {
+  kind: 'integration';
+  id: string;
+  name: string;
+  scopes: string[];
+}
+
+export interface UserPrincipal {
+  kind: 'user';
+  id: string;
+  name: string;
+  /** Lo necesita el panel para juzgar una contraseña nueva igual que aquí. */
+  email: string;
+  /** Clave del rol (`administrador`, `operador` o uno creado en el panel). */
+  role: string;
+  roleName: string;
+  /**
+   * Se leen del rol en cada petición, no al entrar: un permiso que se quita
+   * deja de servir en la siguiente, sin esperar a que caduque la sesión.
+   */
+  permissions: Permiso[];
+  /** Si no, la sesión solo sirve para darlo de alta (§8.1). */
+  totpEnabled: boolean;
+  /**
+   * Entró con una contraseña que generó otra persona. Hasta cambiarla, la
+   * sesión solo sirve para eso (`AllowWithTemporaryPassword`).
+   */
+  mustChangePassword: boolean;
+}
+
+export interface DriverPrincipal {
+  kind: 'driver';
+  id: string;
+  code: string;
+  name: string;
+  deviceId: string;
+}
+
+/**
+ * Identidad y acceso (§8.1).
+ *
+ * Tres actores con mecanismos distintos y ninguna credencial compartida:
+ *  - oficina: correo + contraseña Argon2id + TOTP, sesión en cookie;
+ *  - conductor: código + placa + PIN, con el dispositivo registrado;
+ *  - integración: clave de API con ámbitos, solo desde la red interna.
+ */
+@Injectable()
+export class IdentityService {
+  private readonly logger = new Logger(IdentityService.name);
+
+  constructor(
+    @Inject(DB) private readonly db: Database,
+    // Por token explícito: `tsx`, con el que corren los comandos de `cli/`,
+    // no emite los metadatos de tipos que Nest usa para inyectar.
+    @Inject(AuditService) private readonly audit: AuditService,
+  ) {}
+
+  /* -------------------------------------------------------- claves de API */
+
+  /**
+   * Las claves tienen la forma `tax_<prefijo-hex>_<secreto>`. El prefijo
+   * permite encontrar la fila sin verificar Argon2 contra toda la tabla, que
+   * es lo que convertiría esto en una denegación de servicio trivial.
+   *
+   * El prefijo es hexadecimal a propósito: el secreto va en base64url, cuyo
+   * alfabeto incluye `_`, así que solo se puede partir por los dos primeros
+   * separadores y el resto es el secreto entero.
+   */
+  async verifyApiKey(presented: string): Promise<ApiPrincipal | null> {
+    const match = /^tax_([0-9a-f]{8})_(.+)$/.exec(presented);
+    if (!match) return null;
+    const [, prefix, secret] = match as unknown as [string, string, string];
+
+    const [row] = await this.db
+      .select()
+      .from(apiKeys)
+      .where(
+        and(
+          eq(apiKeys.prefix, prefix),
+          isNull(apiKeys.revokedAt),
+          or(isNull(apiKeys.expiresAt), gt(apiKeys.expiresAt, new Date())),
+        ),
+      )
+      .limit(1);
+
+    if (!row) return null;
+    if (!(await verifySecret(row.keyHash, secret))) return null;
+
+    // No se espera a que termine: marcar el uso no puede frenar la petición.
+    void this.db
+      .update(apiKeys)
+      .set({ lastUsedAt: new Date() })
+      .where(eq(apiKeys.id, row.id))
+      .catch((error: unknown) => this.logger.warn({ err: error }, 'No se pudo marcar el uso de la clave'));
+
+    return { kind: 'integration', id: row.id, name: row.name, scopes: row.scopes };
+  }
+
+  /** Crea una clave y devuelve el secreto UNA sola vez: después solo el hash. */
+  async createApiKey(name: string, scopes: string[]): Promise<{ id: string; key: string }> {
+    const id = uuidv7();
+    const prefix = randomHex(4);
+    const secret = randomToken(32);
+
+    await this.db.insert(apiKeys).values({
+      id,
+      name,
+      prefix,
+      keyHash: await hashSecret(secret),
+      scopes,
+      webhookSecret: randomToken(32),
+    });
+
+    return { id, key: `tax_${prefix}_${secret}` };
+  }
+
+  /* ---------------------------------------------------------- conductores */
+
+  /**
+   * Acceso del conductor: código + PIN (§8.1).
+   *
+   * El código circula entre compañeros, así que el PIN es lo único que de
+   * verdad autentica. Se bloquea a los cinco intentos y siempre se responde
+   * lo mismo, para no revelar si el código existe.
+   *
+   * La placa salió del acceso el 17/11/2026: aquí solo se comprobaba que
+   * tuviera cinco letras, y el carro de verdad se elige al abrir el turno,
+   * porque un conductor maneja varios carros y un carro varios conductores.
+   * El acceso dice QUIÉN es; el turno, en QUÉ carro va.
+   */
+  async loginDriver(
+    code: string,
+    pin: string,
+    deviceLabel: string,
+    installId?: string,
+  ): Promise<{
+    driver: DriverPrincipal;
+    refreshToken: string;
+    /** Sesiones que este acceso cerró en otros celulares, para cortar su socket. */
+    sesionesCerradas: { driverId: string; deviceId: string; motivo: string }[];
+  }> {
+    const [driver] = await this.db
+      .select()
+      .from(drivers)
+      .where(and(eq(drivers.code, code), eq(drivers.active, true)))
+      .limit(1);
+
+    /*
+     * Siempre la misma respuesta y el mismo tiempo (17/11/2026).
+     *
+     * Antes, un código que no existía respondía al instante y uno bloqueado
+     * decía «bloqueado»: así se sabía qué códigos existen, y con cinco PIN
+     * malos por código se podía bloquear a toda la flota a propósito. Ahora
+     * un código que no existe pasa igual por Argon2, y uno bloqueado no dice
+     * que lo está. El bloqueo por celular y red (5 intentos, 15 minutos) lo
+     * lleva el controlador; aquí queda el de la cuenta, con un tope más alto,
+     * para frenar un ataque repartido entre muchas redes.
+     */
+    const invalid = new AppError('UNAUTHORIZED', MENSAJE_ACCESO_CONDUCTOR);
+    if (!driver) {
+      await verifySecret(await hashFalso(), pin);
+      throw invalid;
+    }
+
+    if (driver.lockedUntil && driver.lockedUntil > new Date()) {
+      await verifySecret(await hashFalso(), pin);
+      throw invalid;
+    }
+
+    const ok = await verifySecret(driver.pinHash, pin);
+    if (!ok) {
+      // Atómico: sumar en la base, no leer y escribir. Con lecturas, varias
+      // peticiones a la vez veían el mismo contador y el tope no saltaba.
+      await this.db
+        .update(drivers)
+        .set({
+          failedAttempts: sql`${drivers.failedAttempts} + 1`,
+          lockedUntil: sql`case when ${drivers.failedAttempts} + 1 >= ${TOPE_CUENTA_CONDUCTOR}
+                               then now() + make_interval(mins => ${MINUTOS_DE_BLOQUEO})
+                               else ${drivers.lockedUntil} end`,
+        })
+        .where(eq(drivers.id, driver.id));
+      throw invalid;
+    }
+
+    // Después del PIN y no antes: decir «suspendido» a quien no lo tiene
+    // revelaría que el código existe. Con el PIN correcto, en cambio, se le
+    // dice hasta cuándo; un «PIN incorrecto» lo mandaría a pedir otro.
+    if (sigueSuspendido(driver.suspendidoHasta)) {
+      throw new AppError(
+        'DRIVER_SUSPENDED',
+        `Estás suspendido hasta el ${finDeSuspension(driver.suspendidoHasta!)}; para cualquier duda, llama a la oficina.`,
+      );
+    }
+
+    const refreshToken = randomToken(32);
+    let deviceId = uuidv7();
+    const sesionesCerradas: { driverId: string; deviceId: string; motivo: string }[] = [];
+
+    await this.db.transaction(async (tx) => {
+      await tx
+        .update(drivers)
+        .set({ failedAttempts: 0, lockedUntil: null })
+        .where(eq(drivers.id, driver.id));
+
+      // El mismo celular reutiliza su fila en vez de crear una nueva. Si no,
+      // cada acceso dejaría un dispositivo vivo más y el conductor recibiría
+      // la misma oferta repetida, una vez por acceso.
+      const [existing] = installId
+        ? await tx
+            .select({ id: driverDevices.id })
+            .from(driverDevices)
+            .where(
+              and(
+                eq(driverDevices.driverId, driver.id),
+                eq(driverDevices.installId, installId),
+                isNull(driverDevices.revokedAt),
+              ),
+            )
+            .limit(1)
+        : [];
+
+      if (existing) {
+        deviceId = existing.id;
+        // El token anterior deja de valer al sobrescribir el hash. La
+        // suscripción de push se conserva: es el mismo navegador y sigue
+        // siendo válida.
+        await tx
+          .update(driverDevices)
+          .set({
+            label: deviceLabel,
+            refreshTokenHash: sha256Hex(refreshToken),
+            lastSeenAt: new Date(),
+          })
+          .where(eq(driverDevices.id, deviceId));
+      } else {
+        await tx.insert(driverDevices).values({
+          id: deviceId,
+          driverId: driver.id,
+          installId: installId ?? null,
+          label: deviceLabel,
+          refreshTokenHash: sha256Hex(refreshToken),
+          lastSeenAt: new Date(),
+        });
+      }
+
+      /*
+       * Un celular, un conductor a la vez.
+       *
+       * Si este celular estaba a nombre de otro conductor (el carro lo
+       * manejan dos con el mismo teléfono), su sesión aquí se revoca y su
+       * suscripción de push se borra: si no, al de antes le seguirían
+       * llegando ofertas al teléfono que ahora tiene el compañero.
+       */
+      if (installId) {
+        const ajenos = await tx
+          .update(driverDevices)
+          .set({ revokedAt: new Date(), pushSubscription: null })
+          .where(
+            and(
+              eq(driverDevices.installId, installId),
+              ne(driverDevices.driverId, driver.id),
+              isNull(driverDevices.revokedAt),
+            ),
+          )
+          .returning({ id: driverDevices.id, driverId: driverDevices.driverId });
+        for (const fila of ajenos) {
+          sesionesCerradas.push({
+            driverId: fila.driverId,
+            deviceId: fila.id,
+            motivo: `${driver.name} entró en este celular. Tu sesión aquí quedó cerrada.`,
+          });
+        }
+      }
+
+      /*
+       * Un conductor, un celular activo (17/11/2026).
+       *
+       * Como WhatsApp: entrar en otro teléfono cierra la sesión del anterior
+       * y le borra el push. Antes un conductor podía quedar activo en varios
+       * a la vez: las ofertas le llegaban a todos, y quien conociera su PIN
+       * podía usar su cuenta en otro teléfono sin que él se enterara. Esto
+       * también retira las filas sin identificador que dejaba una versión
+       * vieja de la aplicación, una por acceso.
+       */
+      const anteriores = await tx
+        .update(driverDevices)
+        .set({ revokedAt: new Date(), pushSubscription: null })
+        .where(
+          and(
+            eq(driverDevices.driverId, driver.id),
+            ne(driverDevices.id, deviceId),
+            isNull(driverDevices.revokedAt),
+          ),
+        )
+        .returning({ id: driverDevices.id });
+      for (const fila of anteriores) {
+        sesionesCerradas.push({
+          driverId: driver.id,
+          deviceId: fila.id,
+          motivo: 'Entraste en otro celular. Aquí la sesión quedó cerrada.',
+        });
+      }
+    });
+
+    return {
+      driver: {
+        kind: 'driver',
+        id: driver.id,
+        code: driver.code,
+        name: driver.name,
+        deviceId,
+      },
+      refreshToken,
+      sesionesCerradas,
+    };
+  }
+
+  /** Resuelve el principal de un refresh token de conductor. */
+  async resolveDriverToken(token: string): Promise<DriverPrincipal | null> {
+    const [row] = await this.db
+      .select({
+        deviceId: driverDevices.id,
+        driverId: drivers.id,
+        code: drivers.code,
+        name: drivers.name,
+        active: drivers.active,
+        suspendidoHasta: drivers.suspendidoHasta,
+      })
+      .from(driverDevices)
+      .innerJoin(drivers, eq(drivers.id, driverDevices.driverId))
+      .where(
+        and(eq(driverDevices.refreshTokenHash, sha256Hex(token)), isNull(driverDevices.revokedAt)),
+      )
+      .limit(1);
+
+    if (!row || !row.active) return null;
+
+    /*
+     * Un suspendido queda fuera de la PWA, salvo que tenga una carrera
+     * andando: se la deja terminar, porque cortarle el acceso dejaría al
+     * pasajero a mitad de camino y la carrera abierta para siempre. Al
+     * cerrarla se le cierra también el turno, y la siguiente petición ya no
+     * pasa. Solo se consulta para los suspendidos, que son pocos.
+     */
+    if (sigueSuspendido(row.suspendidoHasta)) {
+      const [enCarrera] = await this.db
+        .select({ id: rides.id })
+        .from(rides)
+        .where(and(eq(rides.driverId, row.driverId), inArray(rides.status, ACTIVE_RIDE_STATUSES)))
+        .limit(1);
+      if (!enCarrera) return null;
+    }
+
+    return {
+      kind: 'driver',
+      id: row.driverId,
+      code: row.code,
+      name: row.name,
+      deviceId: row.deviceId,
+    };
+  }
+
+  /* ------------------------------------------------------ Web Push */
+
+  /**
+   * Guarda la suscripción de push del dispositivo.
+   *
+   * Va en `driver_devices` y no en `drivers` porque un conductor puede tener
+   * más de un celular, y porque revocar el dispositivo debe llevarse también
+   * su canal de avisos: si no, un teléfono perdido seguiría recibiendo las
+   * carreras de su dueño.
+   */
+  async savePushSubscription(deviceId: string, subscription: unknown): Promise<void> {
+    await this.db
+      .update(driverDevices)
+      .set({ pushSubscription: JSON.stringify(subscription), lastSeenAt: new Date() })
+      .where(eq(driverDevices.id, deviceId));
+  }
+
+  /**
+   * Suma un intento fallido de un usuario de oficina en una sola sentencia y
+   * lo bloquea al llegar al tope. Devuelve cuántos lleva.
+   */
+  private async sumarFalloDeUsuario(userId: string): Promise<number> {
+    const [fila] = await this.db
+      .update(users)
+      .set({
+        failedAttempts: sql`${users.failedAttempts} + 1`,
+        lockedUntil: sql`case when ${users.failedAttempts} + 1 >= ${INTENTOS_DE_USUARIO}
+                             then now() + make_interval(mins => ${MINUTOS_DE_BLOQUEO})
+                             else ${users.lockedUntil} end`,
+      })
+      .where(eq(users.id, userId))
+      .returning({ intentos: users.failedAttempts });
+    return fila?.intentos ?? 0;
+  }
+
+  /**
+   * El conductor sale de este celular («Cambiar de conductor»): la sesión
+   * deja de valer y el push se borra, para que no le lleguen ofertas a un
+   * teléfono que ya tiene otro.
+   */
+  async revocarDispositivo(deviceId: string): Promise<void> {
+    await this.db
+      .update(driverDevices)
+      .set({ revokedAt: new Date(), pushSubscription: null })
+      .where(eq(driverDevices.id, deviceId));
+  }
+
+  async clearPushSubscription(deviceId: string): Promise<void> {
+    await this.db
+      .update(driverDevices)
+      .set({ pushSubscription: null })
+      .where(eq(driverDevices.id, deviceId));
+  }
+
+  /** Dispositivos vivos de un conductor con push configurado. */
+  async pushTargetsFor(driverId: string): Promise<{ deviceId: string; subscription: string }[]> {
+    const rows = await this.db
+      .select({ deviceId: driverDevices.id, subscription: driverDevices.pushSubscription })
+      .from(driverDevices)
+      .where(and(eq(driverDevices.driverId, driverId), isNull(driverDevices.revokedAt)));
+
+    return rows
+      .filter((row): row is { deviceId: string; subscription: string } => Boolean(row.subscription))
+      .map((row) => ({ deviceId: row.deviceId, subscription: row.subscription }));
+  }
+
+  /** La oficina revoca un celular perdido (§8.1). */
+  async revokeDevice(deviceId: string): Promise<void> {
+    await this.db
+      .update(driverDevices)
+      .set({ revokedAt: new Date() })
+      .where(eq(driverDevices.id, deviceId));
+  }
+
+  /* -------------------------------------------------------------- oficina */
+
+  async loginUser(
+    email: string,
+    password: string,
+    secondFactor?: string,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<{ user: UserPrincipal; token: string; expiresAt: Date }> {
+    const env = loadEnv();
+    const [fila] = await this.db
+      .select({ user: users, rol: roles })
+      .from(users)
+      .innerJoin(roles, eq(roles.key, users.role))
+      .where(and(eq(users.email, normalizeLogin(email)), eq(users.active, true)))
+      .limit(1);
+
+    const invalid = new AppError('UNAUTHORIZED', 'Correo o contraseña incorrectos');
+    if (!fila) throw invalid;
+    const user = fila.user;
+
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      throw new AppError('UNAUTHORIZED', 'Cuenta bloqueada por intentos fallidos');
+    }
+
+    if (!(await verifySecret(user.passwordHash, password))) {
+      await this.sumarFalloDeUsuario(user.id);
+      throw invalid;
+    }
+
+    // Después de comprobarla, no antes: decir «caducó» a quien no la sabe
+    // revelaría que la cuenta existe y que tiene una temporal pendiente.
+    if (user.tempPasswordExpiresAt && user.tempPasswordExpiresAt <= new Date()) {
+      throw new AppError(
+        'TEMP_PASSWORD_EXPIRED',
+        'La contraseña temporal caducó: pide otra a un administrador',
+      );
+    }
+
+    /*
+     * Segundo factor (§8.1). Solo se exige si está activo: una cuenta recién
+     * creada tiene que poder entrar una vez para darlo de alta, y el guardia
+     * de sesión se encarga de que esa sesión no sirva para nada más.
+     */
+    let usedCounter: number | undefined;
+    let usedRecoveryCodeId: string | undefined;
+
+    if (user.totpEnabled) {
+      if (!secondFactor) {
+        throw new AppError('TOTP_REQUIRED', 'Escribe el código de tu aplicación de autenticación');
+      }
+
+      const check = await this.checkSecondFactor(user, secondFactor);
+      if (!check.ok) {
+        // Un código fallido cuenta igual que una contraseña fallida: seis
+        // dígitos son uno entre un millón, pero mil intentos son gratis.
+        await this.sumarFalloDeUsuario(user.id);
+        throw new AppError('TOTP_INVALID', 'Código incorrecto o ya usado');
+      }
+
+      usedCounter = check.counter;
+      usedRecoveryCodeId = check.recoveryCodeId;
+    }
+
+    const token = randomToken(32);
+    const expiresAt = new Date(Date.now() + env.SESSION_TTL_HOURS * 3600_000);
+
+    await this.db.transaction(async (tx) => {
+      await tx
+        .update(users)
+        .set({
+          failedAttempts: 0,
+          lockedUntil: null,
+          lastLoginAt: new Date(),
+          // Quemar el intervalo va en la misma transacción que abrir la
+          // sesión: si se hiciera después, dos accesos a la vez con el mismo
+          // código entrarían los dos.
+          ...(usedCounter != null ? { totpLastCounter: usedCounter } : {}),
+        })
+        .where(eq(users.id, user.id));
+
+      if (usedRecoveryCodeId) {
+        await tx
+          .update(userRecoveryCodes)
+          .set({ usedAt: new Date() })
+          .where(eq(userRecoveryCodes.id, usedRecoveryCodeId));
+      }
+
+      await tx.insert(sessions).values({
+        id: uuidv7(),
+        userId: user.id,
+        tokenHash: sha256Hex(token),
+        ip,
+        userAgent,
+        expiresAt,
+      });
+    });
+
+    if (usedRecoveryCodeId) {
+      this.logger.warn(
+        { userId: user.id },
+        'Acceso con código de respaldo: el operador perdió su teléfono',
+      );
+    }
+
+    return {
+      user: {
+        kind: 'user',
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        roleName: fila.rol.name,
+        permissions: permisosDelRol(fila.rol),
+        totpEnabled: user.totpEnabled,
+        mustChangePassword: user.tempPasswordExpiresAt !== null,
+      },
+      token,
+      expiresAt,
+    };
+  }
+
+  async resolveSession(token: string): Promise<UserPrincipal | null> {
+    const [row] = await this.db
+      .select({
+        userId: users.id,
+        name: users.name,
+        email: users.email,
+        role: users.role,
+        roleName: roles.name,
+        rolePermissions: roles.permissions,
+        active: users.active,
+        totpEnabled: users.totpEnabled,
+        tempPasswordExpiresAt: users.tempPasswordExpiresAt,
+        expiresAt: sessions.expiresAt,
+        revokedAt: sessions.revokedAt,
+      })
+      .from(sessions)
+      .innerJoin(users, eq(users.id, sessions.userId))
+      .innerJoin(roles, eq(roles.key, users.role))
+      .where(eq(sessions.tokenHash, sha256Hex(token)))
+      .limit(1);
+
+    if (!row || !row.active || row.revokedAt || row.expiresAt <= new Date()) return null;
+    return {
+      kind: 'user',
+      id: row.userId,
+      name: row.name,
+      email: row.email,
+      role: row.role,
+      roleName: row.roleName,
+      permissions: permisosDelRol({ key: row.role, permissions: row.rolePermissions }),
+      totpEnabled: row.totpEnabled,
+      mustChangePassword: row.tempPasswordExpiresAt !== null,
+    };
+  }
+
+  async logout(token: string): Promise<void> {
+    await this.db
+      .update(sessions)
+      .set({ revokedAt: new Date() })
+      .where(eq(sessions.tokenHash, sha256Hex(token)));
+  }
+
+  /* ------------------------------------------------- segundo factor --- */
+
+  /**
+   * Arranca el alta: genera el secreto y lo guarda cifrado, todavía inactivo.
+   *
+   * Se devuelve en claro una sola vez, que es cuando el teléfono lo escanea.
+   * Queda inactivo a propósito: si se activara aquí, un QR mal escaneado
+   * dejaría al operador fuera de su propio panel sin forma de volver.
+   */
+  async startTotpEnrollment(userId: string): Promise<{ secret: string; uri: string }> {
+    const env = loadEnv();
+    const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!user) throw new AppError('NOT_FOUND', 'El usuario no existe');
+
+    if (user.totpEnabled) {
+      throw new AppError('FORBIDDEN', 'El segundo factor ya está activo en esta cuenta');
+    }
+
+    const secret = generateTotpSecret();
+    await this.db
+      .update(users)
+      .set({ totpSecretEncrypted: encryptColumn(env.ENCRYPTION_KEY, secret) })
+      .where(eq(users.id, userId));
+
+    return { secret, uri: otpauthUri(user.email, secret) };
+  }
+
+  /**
+   * Confirma el alta con un código del teléfono y entrega los de respaldo.
+   *
+   * Los códigos se devuelven una sola vez: en la base solo queda su hash, así
+   * que no hay forma de volver a enseñarlos. Es incómodo a propósito.
+   */
+  async activateTotp(userId: string, code: string): Promise<string[]> {
+    const env = loadEnv();
+    const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!user) throw new AppError('NOT_FOUND', 'El usuario no existe');
+
+    if (user.totpEnabled) {
+      throw new AppError('FORBIDDEN', 'El segundo factor ya está activo en esta cuenta');
+    }
+    if (!user.totpSecretEncrypted) {
+      throw new AppError('TOTP_SETUP_REQUIRED', 'Primero hay que generar el secreto');
+    }
+
+    const secret = base32Decode(decryptColumn(env.ENCRYPTION_KEY, user.totpSecretEncrypted));
+    const check = verifyTotp(secret, code);
+    if (!check.valid) {
+      throw new AppError('TOTP_INVALID', 'El código no coincide: revisa la hora del teléfono');
+    }
+
+    const codes = Array.from({ length: 10 }, () => recoveryCode());
+    const hashed = await Promise.all(codes.map((plain) => hashSecret(plain)));
+
+    await this.db.transaction(async (tx) => {
+      await tx
+        .update(users)
+        .set({ totpEnabled: true, totpLastCounter: check.counter ?? null })
+        .where(eq(users.id, userId));
+
+      // Un alta nueva invalida los códigos de la anterior: si no, un repuesto
+      // de hace meses seguiría abriendo la puerta.
+      await tx.delete(userRecoveryCodes).where(eq(userRecoveryCodes.userId, userId));
+      await tx.insert(userRecoveryCodes).values(
+        hashed.map((codeHash) => ({ id: uuidv7(), userId, codeHash })),
+      );
+    });
+
+    this.logger.log({ userId }, 'Segundo factor activado');
+    return codes;
+  }
+
+  /**
+   * Comprueba el código del acceso: primero TOTP, y si no, uno de respaldo.
+   *
+   * Los de respaldo se recorren uno a uno porque Argon2 lleva su propia sal y
+   * no se puede buscar por hash. Son diez verificaciones de unos 40 ms en el
+   * peor caso, y solo en el camino de «perdí el teléfono», que es raro.
+   */
+  private async checkSecondFactor(
+    user: typeof users.$inferSelect,
+    presented: string,
+  ): Promise<{ ok: boolean; counter?: number; recoveryCodeId?: string }> {
+    const env = loadEnv();
+    const code = presented.trim();
+
+    if (/^\d{6}$/.test(code) && user.totpSecretEncrypted) {
+      const secret = base32Decode(decryptColumn(env.ENCRYPTION_KEY, user.totpSecretEncrypted));
+      const check = verifyTotp(secret, code, { lastCounter: user.totpLastCounter });
+      if (check.valid) return { ok: true, counter: check.counter };
+      // Sin return: un código de respaldo también puede tener seis dígitos si
+      // alguien escribe solo una mitad, y no cuesta nada seguir mirando.
+    }
+
+    const pendientes = await this.db
+      .select({ id: userRecoveryCodes.id, codeHash: userRecoveryCodes.codeHash })
+      .from(userRecoveryCodes)
+      .where(and(eq(userRecoveryCodes.userId, user.id), isNull(userRecoveryCodes.usedAt)));
+
+    for (const candidate of pendientes) {
+      if (await verifySecret(candidate.codeHash, code)) {
+        return { ok: true, recoveryCodeId: candidate.id };
+      }
+    }
+
+    return { ok: false };
+  }
+
+  /**
+   * Confirma con el teléfono un cambio que da poder: el rol de alguien, o los
+   * permisos de un rol.
+   *
+   * La sesión abierta no basta. En una oficina el computador de un
+   * administrador puede quedarse sin vigilancia, y sin esto cualquiera que
+   * pasara por delante se haría administrador en dos clics.
+   *
+   * Va dentro de la transacción del cambio: si el cambio falla después, el
+   * código no se gasta. Solo vale el de la aplicación, no los de respaldo:
+   * esos son para entrar cuando se pierde el teléfono. Y como seis dígitos
+   * se adivinan probando, cinco fallos seguidos cierran todas sus sesiones.
+   */
+  async confirmarConSegundoFactor(tx: Database, userId: string, presented: string | undefined): Promise<void> {
+    if (!presented?.trim()) {
+      throw new AppError(
+        'SECOND_FACTOR_REQUIRED',
+        'Escribe el código de tu aplicación de autenticación para confirmar el cambio',
+      );
+    }
+
+    const [user] = await tx.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!user?.totpEnabled || !user.totpSecretEncrypted) {
+      throw new AppError('SECOND_FACTOR_REQUIRED', 'Activa el segundo factor antes de cambiar permisos');
+    }
+
+    const env = loadEnv();
+    const secret = base32Decode(decryptColumn(env.ENCRYPTION_KEY, user.totpSecretEncrypted));
+    const check = verifyTotp(secret, presented, { lastCounter: user.totpLastCounter });
+
+    // Quemar el intervalo con una condición, no leyendo y escribiendo: dos
+    // peticiones a la vez con el mismo código las dos verían «vale», pero
+    // solo una encuentra el contador todavía por debajo.
+    const quemado =
+      check.valid && check.counter != null
+        ? await tx
+            .update(users)
+            .set({ totpLastCounter: check.counter, failedAttempts: 0 })
+            .where(
+              and(
+                eq(users.id, userId),
+                or(isNull(users.totpLastCounter), lt(users.totpLastCounter, check.counter)),
+              ),
+            )
+            .returning({ id: users.id })
+        : [];
+    if (quemado.length) return;
+
+    // Fuera de la transacción: el fallo tiene que contar aunque esta se deshaga.
+    const intentos = await this.sumarFalloDeUsuario(userId);
+
+    if (intentos >= INTENTOS_DE_USUARIO) {
+      await this.db
+        .update(sessions)
+        .set({ revokedAt: new Date() })
+        .where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)));
+      this.logger.warn({ userId }, 'Cinco códigos fallidos al confirmar un cambio: sesiones cerradas');
+      throw new AppError('UNAUTHORIZED', 'Demasiados códigos incorrectos: se cerró la sesión por seguridad');
+    }
+
+    throw new AppError('SECOND_FACTOR_INVALID', 'Código incorrecto o ya usado: espera el siguiente');
+  }
+
+  /** Cuántos repuestos le quedan al operador, para avisarle cuando se acaban. */
+  async recoveryCodesLeft(userId: string): Promise<number> {
+    const rows = await this.db
+      .select({ id: userRecoveryCodes.id })
+      .from(userRecoveryCodes)
+      .where(and(eq(userRecoveryCodes.userId, userId), isNull(userRecoveryCodes.usedAt)));
+    return rows.length;
+  }
+
+  /**
+   * El propio usuario cambia su contraseña (§8.1).
+   *
+   * Pide la actual, y eso no es burocracia: sin ello, cualquiera que se
+   * siente ante una sesión abierta podría cambiarla y dejar fuera a su dueño.
+   * Es la diferencia entre una sesión secuestrada durante doce horas y una
+   * cuenta perdida.
+   *
+   * Cierra las demás sesiones de esa persona pero NO la actual: cerrarla
+   * sería expulsarla justo después de hacer lo correcto.
+   */
+  async changeOwnPassword(
+    userId: string,
+    actual: string,
+    nueva: string,
+    tokenActual: string | undefined,
+    ip?: string,
+  ): Promise<void> {
+    const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!user) throw new AppError('NOT_FOUND', 'El usuario no existe');
+
+    if (!(await verifySecret(user.passwordHash, actual))) {
+      throw new AppError('UNAUTHORIZED', 'La contraseña actual no es correcta');
+    }
+
+    if (await verifySecret(user.passwordHash, nueva)) {
+      throw new AppError('VALIDATION_FAILED', 'La contraseña nueva tiene que ser distinta de la actual');
+    }
+
+    // La misma política que juzga el panel: si divergieran, el operador
+    // escribiría algo válido a sus ojos y el servidor lo rechazaría sin
+    // explicar por qué.
+    const veredicto = evaluatePassword(nueva, { email: user.email, name: user.name });
+    if (!veredicto.ok) {
+      throw new AppError('VALIDATION_FAILED', veredicto.problemas.join(' '));
+    }
+
+    const hashNuevo = await hashSecret(nueva);
+    const hashSesionActual = tokenActual ? sha256Hex(tokenActual) : null;
+
+    await this.db.transaction(async (tx) => {
+      await tx
+        .update(users)
+        // Elegida por su dueño: deja de ser temporal.
+        .set({ passwordHash: hashNuevo, failedAttempts: 0, lockedUntil: null, tempPasswordExpiresAt: null })
+        .where(eq(users.id, userId));
+
+      await tx
+        .update(sessions)
+        .set({ revokedAt: new Date() })
+        .where(
+          and(
+            eq(sessions.userId, userId),
+            isNull(sessions.revokedAt),
+            ...(hashSesionActual ? [ne(sessions.tokenHash, hashSesionActual)] : []),
+          ),
+        );
+
+      await this.audit.record(
+        {
+          actorId: user.id,
+          actorName: user.name,
+          role: user.role,
+          action: user.tempPasswordExpiresAt
+            ? 'Cambió su contraseña temporal por una propia'
+            : 'Cambió su propia contraseña',
+          entity: 'users',
+          entityId: user.email,
+          ip,
+        },
+        tx as unknown as Database,
+      );
+    });
+
+    this.logger.log({ userId }, 'Contraseña cambiada por su dueño');
+  }
+
+  /** Secreto con el que se firman los webhooks de una integración (§7.1). */
+  async webhookSecretFor(integrationName: string): Promise<string | null> {
+    const [row] = await this.db
+      .select({ secret: apiKeys.webhookSecret })
+      .from(apiKeys)
+      .where(and(eq(apiKeys.name, integrationName), isNull(apiKeys.revokedAt)))
+      .limit(1);
+    return row?.secret ?? null;
+  }
+}
+
+/**
+ * Código de respaldo: dos grupos de cinco, con el alfabeto de base32.
+ *
+ * Sin `0`, `1` ni `8`, porque esto se imprime o se copia a mano y confundir
+ * un cero con una O cuando ya perdiste el teléfono sería el peor momento.
+ * Cincuenta bits de entropía: no se adivina.
+ */
+function recoveryCode(): string {
+  const alfabeto = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const bytes = randomBytes(10);
+  const chars = [...bytes].map((byte) => alfabeto[byte % alfabeto.length]);
+  return `${chars.slice(0, 5).join('')}-${chars.slice(5).join('')}`;
+}

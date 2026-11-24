@@ -1,0 +1,366 @@
+import { useEffect, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
+import { Camera, Flag, LocateFixed, Lock, Navigation, Phone, UserCheck, X } from 'lucide-react';
+import type { MotivoCancelacionConductor, RideStatus } from '@tax/shared';
+import { RIDE_STATUS_LABEL, formatDistance } from '@tax/shared';
+import { BANDA_DE_ESTADO, StatusPill, cn, transition } from '@tax/ui';
+import { BotonDeEtapa, tonoDeEtapa } from '../components/BotonDeEtapa';
+import { ActionBar, AddressBlock, Screen } from '../components/Chrome';
+import { MedioDePago } from '../components/MedioDePago';
+import { AvisoDeUbicacion, IrConMapas } from '../components/IrConMapas';
+import { CancelarCarrera } from '../components/CancelarCarrera';
+import { api } from '../api/client';
+import type { OfferedRide } from '../state/session';
+
+type ActiveStatus = Extract<RideStatus, 'ASSIGNED' | 'DRIVER_ARRIVED' | 'IN_PROGRESS'>;
+
+const STEPS: ActiveStatus[] = ['ASSIGNED', 'DRIVER_ARRIVED', 'IN_PROGRESS'];
+
+/**
+ * Carrera en curso: un solo botón grande por estado.
+ *
+ * El botón, la píldora y la barra llevan el color del estado en el tablero
+ * del panel: negro en camino, rojo en el lugar —el botón «Pasajero a bordo»—
+ * y verde en curso —«Finalizar»—. La empresa lo cambió así después de la
+ * HU-UI-01, que dejaba el del lugar en azul.
+ *
+ * Debajo de la dirección van Maps y Waze, ya con la ruta pedida, y un aviso
+ * cuando el punto no es la ubicación que compartió el cliente. No se muestra
+ * destino: el cliente casi nunca lo dice al pedir, y en la pantalla del
+ * conductor se confundía con la dirección de recogida.
+ *
+ * "Llegué" solo se habilita dentro del radio de llegada (el de la API); más lejos se puede
+ * marcar igual, pero queda registrada la excepción (§5.3). "Finalizar" queda
+ * bloqueado los primeros minutos con el pasajero a bordo: el servidor no deja
+ * cerrar antes, y un botón que siempre falla es peor que uno que dice cuánto
+ * falta.
+ */
+export function Carrera({
+  offer,
+  status,
+  metersToPickup,
+  minRideMinutes,
+  radioLlegada,
+  enviando = false,
+  onArrived,
+  onBoard,
+  onFinish,
+  onCancel,
+}: {
+  offer: OfferedRide;
+  status: ActiveStatus;
+  metersToPickup: number | null;
+  minRideMinutes: number | null;
+  /** Metros dentro de los que «Llegué» cuenta como en el punto. */
+  radioLlegada: number;
+  /** Hay una etapa enviándose: el botón no acepta otro toque. */
+  enviando?: boolean;
+  onArrived: () => void;
+  onBoard: () => void;
+  onFinish: () => void;
+  /** Cancelar por causa mayor; devuelve el error o `null`. */
+  onCancel: (motivo: MotivoCancelacionConductor, detalle?: string) => Promise<string | null>;
+}) {
+  // Sin punto (carrera sin ubicar) no hay distancia que medir: el conductor
+  // se guía por la dirección y marca «Llegué» cuando lo encuentre.
+  const conPunto = offer.pickupPoint !== undefined;
+  const nearby = conPunto && metersToPickup !== null && metersToPickup <= radioLlegada;
+  const stepIndex = STEPS.indexOf(status);
+  const tone = tonoDeEtapa(status);
+  const faltan = useFaltaParaFinalizar(status === 'IN_PROGRESS' ? offer.startedAt : undefined, minRideMinutes);
+
+  return (
+    <>
+      <Screen className="gap-4">
+        <Progress stepIndex={stepIndex} status={status} />
+
+        <div className="flex items-center justify-between gap-3">
+          <StatusPill tone={tone} size="md" live>
+            {RIDE_STATUS_LABEL[status]}
+          </StatusPill>
+          <span className="font-mono text-caption text-ink-muted">{offer.code}</span>
+        </div>
+
+        {status !== 'IN_PROGRESS' ? (
+          <div className="flex flex-col gap-3">
+            <AddressBlock
+              label="Recoger en"
+              text={offer.pickupText}
+              reference={offer.pickupReference}
+            />
+            <AvisoDeUbicacion origen={offer.pickupSource} />
+            <IrConMapas point={offer.pickupPoint} text={offer.pickupText} enlace={offer.pickupLink} />
+          </div>
+        ) : (
+          // Con el pasajero a bordo lo que importa es cómo va a pagar.
+          <MedioDePago electronico={offer.pagoElectronico} grande />
+        )}
+
+        {/* La foto solo mientras va a recogerlo: después ya no le sirve, y
+            es la puerta de la casa de alguien. */}
+        {status !== 'IN_PROGRESS' && offer.pickupPhotoAt ? (
+          <FotoDelLugar rideId={offer.rideId} version={offer.pickupPhotoAt} />
+        ) : null}
+
+        {status !== 'IN_PROGRESS' && conPunto ? (
+          <div
+            className={cn(
+              'flex items-center gap-3 rounded-lg border px-4 py-3.5',
+              nearby
+                ? 'tone-positive border-[var(--tone-line)] bg-[var(--tone-bg)]'
+                : 'border-line bg-surface-sunk',
+            )}
+          >
+            <LocateFixed
+              className={cn('size-5 shrink-0', nearby ? 'text-[var(--tone-ink)]' : 'text-ink-muted')}
+            />
+            <div className="min-w-0 flex-1">
+              <p className={cn('text-lg font-medium', nearby ? 'text-[var(--tone-ink)]' : 'text-ink')}>
+                {nearby
+                  ? 'Estás en el punto'
+                  : metersToPickup === null
+                    ? 'Buscando tu posición…'
+                    : `A ${formatDistance(metersToPickup / 1000)} del punto`}
+              </p>
+              <p className="text-caption text-ink-muted">
+                {nearby
+                  ? 'Puedes marcar que llegaste.'
+                  : metersToPickup === null
+                    ? 'La distancia aparece en cuanto responda el GPS.'
+                    : 'La distancia se actualiza con tu GPS.'}
+              </p>
+            </div>
+          </div>
+        ) : null}
+
+        {/* El teléfono solo aparece una vez aceptada la carrera (§8.1). */}
+        <div className="rounded-lg border border-line bg-surface p-4">
+          <p className="text-micro font-semibold uppercase tracking-[0.07em] text-ink-muted">
+            Cliente
+          </p>
+          <div className="mt-1.5 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-xl font-medium text-ink">
+                {offer.customerName ?? 'Cliente'}
+              </p>
+              <p className="font-mono text-base text-ink-secondary">
+                {offer.customerPhone ?? 'Cargando…'}
+              </p>
+            </div>
+            <a
+              href={offer.customerPhone ? `tel:${offer.customerPhone}` : undefined}
+              aria-label={`Llamar a ${offer.customerName ?? 'el cliente'}`}
+              className={cn(
+                'flex size-12 shrink-0 items-center justify-center rounded-full border border-line bg-surface-sunk text-ink',
+                'transition-colors duration-150 ease-[var(--ease-standard)] active:bg-accent-soft',
+              )}
+            >
+              <Phone className="size-5" />
+            </a>
+          </div>
+          {status !== 'IN_PROGRESS' ? (
+            <p className="mt-3 border-t border-line pt-3 text-lg text-ink-secondary">
+              Paga con{' '}
+              <span className={cn('font-semibold', offer.pagoElectronico ? 'text-brand-ink' : 'text-ink')}>
+                {offer.pagoElectronico ? 'pago electrónico' : 'efectivo'}
+              </span>
+            </p>
+          ) : null}
+          {offer.notes ? (
+            <p className="mt-3 border-t border-line pt-3 text-lg leading-snug text-ink-secondary">
+              {offer.notes}
+            </p>
+          ) : null}
+        </div>
+      </Screen>
+
+      <ActionBar>
+        {status === 'ASSIGNED' ? (
+          <BotonDeEtapa estado="ASSIGNED" icon={<Navigation className="size-6" />} onClick={onArrived} disabled={enviando}>
+            {enviando ? 'Enviando…' : nearby ? 'Llegué al punto' : 'Marcar que llegué'}
+          </BotonDeEtapa>
+        ) : null}
+
+        {status === 'DRIVER_ARRIVED' ? (
+          <BotonDeEtapa estado="DRIVER_ARRIVED" icon={<UserCheck className="size-6" />} onClick={onBoard} disabled={enviando}>
+            {enviando ? 'Enviando…' : 'Pasajero a bordo'}
+          </BotonDeEtapa>
+        ) : null}
+
+        {status === 'IN_PROGRESS' ? (
+          minRideMinutes !== null && faltan > 0 ? (
+            <BotonDeEtapa
+              estado="IN_PROGRESS"
+              icon={<Lock className="size-6" />}
+              disabled
+              progreso={1 - faltan / (minRideMinutes * 60_000)}
+            >
+              Finalizar en <span className="tnum">{formatoCuenta(faltan)}</span>
+            </BotonDeEtapa>
+          ) : (
+            <BotonDeEtapa estado="IN_PROGRESS" icon={<Flag className="size-6" />} onClick={onFinish} disabled={enviando}>
+              {enviando ? 'Enviando…' : 'Finalizar carrera'}
+            </BotonDeEtapa>
+          )
+        ) : null}
+
+        {!nearby && status === 'ASSIGNED' && conPunto && metersToPickup !== null ? (
+          <p className="text-center text-base text-ink-muted">
+            Estás a más de {radioLlegada} m; si marcas ahora, queda registrada la excepción.
+          </p>
+        ) : null}
+
+        {status === 'IN_PROGRESS' && minRideMinutes !== null && faltan > 0 ? (
+          <p className="text-center text-base text-ink-muted">
+            Una carrera dura al menos {minRideMinutes} minutos desde que sube el pasajero.
+          </p>
+        ) : null}
+
+        {/* Solo antes de recoger al cliente: con él a bordo, se termina. */}
+        {status !== 'IN_PROGRESS' ? <CancelarCarrera code={offer.code} onConfirmar={onCancel} /> : null}
+      </ActionBar>
+    </>
+  );
+}
+
+/**
+ * Milisegundos que faltan para poder finalizar; 0 si ya se puede.
+ *
+ * Con `minutos` nulo —la API todavía no ha dicho la regla— no se cuenta
+ * nada: el botón queda libre y es el servidor el que rechaza diciendo cuánto
+ * falta. Suponer diez aquí era peor que no saber: con la regla en otro
+ * número, la cuenta atrás terminaba y «Finalizar» fallaba igual.
+ */
+function useFaltaParaFinalizar(startedAt: number | undefined, minutos: number | null): number {
+  const calcular = () =>
+    startedAt === undefined || minutos === null
+      ? 0
+      : Math.max(0, startedAt + minutos * 60_000 - Date.now());
+  const [faltan, setFaltan] = useState(calcular);
+
+  // Al subir el pasajero, la cuenta se pone al día en este mismo render. En
+  // el efecto llegaba un render tarde, y «Finalizar» se pintaba habilitado
+  // un instante antes de bloquearse.
+  const [startedAtPrevio, setStartedAtPrevio] = useState(startedAt);
+  if (startedAtPrevio !== startedAt) {
+    setStartedAtPrevio(startedAt);
+    setFaltan(calcular());
+  }
+
+  useEffect(() => {
+    if (startedAt === undefined || minutos === null) return;
+    const id = window.setInterval(() => {
+      const siguiente = calcular();
+      setFaltan(siguiente);
+      if (siguiente === 0) window.clearInterval(id);
+    }, 1000);
+    return () => window.clearInterval(id);
+    // `calcular` cambia con cada render; lo que importa son sus entradas.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startedAt, minutos]);
+
+  return faltan;
+}
+
+/** «7:42», hacia abajo y sin saltos de anchura gracias a `tnum`. */
+function formatoCuenta(ms: number): string {
+  const total = Math.ceil(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/**
+ * La foto que mandó el cliente: la puerta, la esquina, la tienda de al lado.
+ * En una vereda dice lo que una dirección no dice nunca. Tocándola se ve a
+ * pantalla completa.
+ */
+function FotoDelLugar({ rideId, version }: { rideId: string; version: string }) {
+  const [url, setUrl] = useState<string>();
+  const [fallo, setFallo] = useState(false);
+  const [grande, setGrande] = useState(false);
+
+  useEffect(() => {
+    let creada: string | undefined;
+    let cancelado = false;
+    setFallo(false);
+    api
+      .imagen(`/v1/driver/rides/${rideId}/photo`)
+      .then((blob) => {
+        if (cancelado) return;
+        creada = URL.createObjectURL(blob);
+        setUrl(creada);
+      })
+      .catch(() => {
+        if (!cancelado) setFallo(true);
+      });
+    return () => {
+      cancelado = true;
+      if (creada) URL.revokeObjectURL(creada);
+    };
+    // `version` cambia si el cliente manda otra foto: hay que pedirla de nuevo.
+  }, [rideId, version]);
+
+  if (fallo) return null;
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => url && setGrande(true)}
+        className="overflow-hidden rounded-lg border border-line bg-surface text-left"
+      >
+        <p className="flex items-center gap-1.5 px-4 pb-2 pt-3 text-micro font-semibold uppercase tracking-[0.07em] text-ink-muted">
+          <Camera className="size-3.5" />
+          Foto que envió el cliente
+        </p>
+        {url ? (
+          <img src={url} alt="Foto del lugar de recogida" className="max-h-56 w-full object-cover" />
+        ) : (
+          <div className="animate-breathe h-40 w-full bg-surface-sunk" />
+        )}
+        <p className="px-4 py-2 text-caption text-ink-muted">Toca la foto para verla completa.</p>
+      </button>
+
+      <AnimatePresence>
+        {grande && url ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={transition.fast}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-ink/90 p-3"
+            onClick={() => setGrande(false)}
+          >
+            <img src={url} alt="Foto del lugar de recogida" className="max-h-full max-w-full object-contain" />
+            <button
+              type="button"
+              aria-label="Cerrar la foto"
+              onClick={() => setGrande(false)}
+              className="absolute right-4 top-4 flex size-12 items-center justify-center rounded-full bg-on-accent/15 text-on-accent"
+            >
+              <X className="size-6" />
+            </button>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </>
+  );
+}
+
+/** Tres pasos; el relleno avanza, no salta, y lleva el color de la etapa. */
+function Progress({ stepIndex, status }: { stepIndex: number; status: ActiveStatus }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {STEPS.map((step, index) => (
+        <div key={step} className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-sunk">
+          <motion.div
+            initial={false}
+            animate={{ scaleX: index <= stepIndex ? 1 : 0 }}
+            transition={transition.panel}
+            style={{ originX: 0 }}
+            className={cn('h-full rounded-full', BANDA_DE_ESTADO[status])}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}

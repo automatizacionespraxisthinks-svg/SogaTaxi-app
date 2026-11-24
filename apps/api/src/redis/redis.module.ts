@@ -1,0 +1,64 @@
+import { Global, Inject, Module, type OnApplicationShutdown } from '@nestjs/common';
+import { Redis } from 'ioredis';
+import { loadEnv } from '../config/env';
+
+export const REDIS = Symbol('REDIS');
+
+/**
+ * Redis 7 existente, con usuario ACL propio y todas las claves bajo el
+ * prefijo `tax:` (ADR-05): un fallo de seguridad en otro sistema del VPS no
+ * alcanza estos datos.
+ *
+ * Guarda tres cosas: la última posición de cada conductor (GEO), las colas de
+ * BullMQ y las claves de limitación de tasa.
+ */
+@Global()
+@Module({
+  providers: [
+    {
+      provide: REDIS,
+      useFactory: () => {
+        const env = loadEnv();
+        return new Redis(env.REDIS_URL, {
+          keyPrefix: env.REDIS_PREFIX,
+          // BullMQ exige null; aquí también evita que un bloqueo deje la
+          // petición esperando para siempre.
+          maxRetriesPerRequest: null,
+          enableReadyCheck: true,
+          lazyConnect: false,
+        });
+      },
+    },
+  ],
+  exports: [REDIS],
+})
+export class RedisModule implements OnApplicationShutdown {
+  constructor(@Inject(REDIS) private readonly redis: Redis) {}
+
+  async onApplicationShutdown(): Promise<void> {
+    await this.redis.quit();
+  }
+}
+
+/** Claves de Redis en un solo sitio, para no escribirlas sueltas por ahí. */
+export const redisKeys = {
+  /** Conjunto GEO con la última posición de cada conductor en turno. */
+  driverPositions: 'geo:drivers',
+  /** Hash con la antigüedad y el estado de cada posición. */
+  driverMeta: (driverId: string) => `driver:${driverId}:meta`,
+  /** Limitación de tasa por sujeto. */
+  rateLimit: (subject: string, window: number) => `rl:${subject}:${window}`,
+  /** Marca de oleada en curso, para no lanzar dos a la vez. */
+  dispatchLock: (rideId: string) => `dispatch:${rideId}:lock`,
+  /**
+   * Dirección ya resuelta. En un pueblo las mismas direcciones se repiten
+   * mucho, y cada consulta al geocodificador se paga y se espera.
+   *
+   * `q2` desde que el filtro de resultados se endureció (3/11/2026): las
+   * respuestas guardadas con el filtro viejo pueden ser puntos equivocados,
+   * y con la clave nueva se vuelven a preguntar en vez de reutilizarse.
+   */
+  geocode: (consulta: string) => `geo:q2:${consulta}`,
+  /** El uso de Google de un día en Paipa (YYYY-MM-DD): un hash de contadores. */
+  geocodeUso: (dia: string) => `geo:uso:${dia}`,
+} as const;

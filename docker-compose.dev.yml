@@ -1,0 +1,51 @@
+# Solo para desarrollo local.
+#
+# En el VPS NO se despliega este archivo: allí SogaTaxi reutiliza el
+# PostgreSQL 16 y el Redis 7 que ya existen, con usuario propio y prefijo de
+# claves (ADR-04 y ADR-05). Esto únicamente reproduce esas dos piezas en la
+# máquina de quien desarrolla, con las mismas versiones.
+
+# Nombre y volúmenes propios: este repositorio salió de una copia del de
+# Tax Turístico, y con el mismo nombre los dos compartían la misma base de
+# desarrollo. Los puertos son los mismos, así que no corren a la vez.
+name: sogataxi-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: tax
+      POSTGRES_PASSWORD: tax_dev_password
+      POSTGRES_DB: tax
+    ports:
+      - '55432:5432'
+    volumes:
+      - sogataxi-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U tax -d tax']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    # noeviction: las colas de BullMQ y las claves de idempotencia no se
+    # pueden descartar por presión de memoria.
+    command: ['redis-server', '--maxmemory-policy', 'noeviction', '--appendonly', 'yes']
+    ports:
+      # Fuera del rango dinamico de Windows (49152-65535) a proposito. Hyper-V
+      # reserva bloques de ese rango al arrancar y cambian en cada reinicio:
+      # el 56379 de antes cayo un dia dentro de 56360-56459 y Redis dejo de
+      # levantar con «acceso a un socket no permitido». Aqui no puede pasar.
+      - '16379:6379'
+    volumes:
+      - sogataxi-redis:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  sogataxi-pg:
+  sogataxi-redis:

@@ -1,0 +1,935 @@
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { motion } from 'motion/react';
+import { Ban, Car, Check, Copy, CreditCard, KeyRound, Smartphone, Trash2, UserPlus } from 'lucide-react';
+import type { Driver } from '@tax/shared';
+import {
+  DIAS_DE_SUSPENSION,
+  MAX_DIAS_SUSPENSION,
+  finDeSuspension,
+  formatRelative,
+} from '@tax/shared';
+import {
+  Banner,
+  Button,
+  Field,
+  Input,
+  Modal,
+  SectionLabel,
+  Sheet,
+  Textarea,
+  cn,
+  transition,
+  useToast,
+} from '@tax/ui';
+import { ApiError, api } from '../api/client';
+import { actions } from '../live/store';
+import { SelectorDeVehiculos, useVehiculos } from './VehiculosAdmin';
+
+/**
+ * Gestión de conductores desde la oficina (§6, §8.1).
+ *
+ * Todo lo que hay aquí lo autoriza el servidor, no esta pantalla: los
+ * endpoints exigen «Gestionar conductores» o «Suspender conductores». Ocultar
+ * los botones a quien no los tiene es cortesía —enseñar algo que siempre va a
+ * fallar es peor que no enseñarlo—, no la barrera.
+ *
+ * El PIN aparece una sola vez, cuando se genera. No hay «ver PIN» en ningún
+ * sitio porque en la base solo existe su hash Argon2; la única salida cuando
+ * un conductor lo olvida es generarle otro.
+ */
+
+/* ------------------------------------------------------- PIN de una vez --- */
+
+function PinUnaVez({ code, pin, onCerrar }: { code: string; pin: string; onCerrar: () => void }) {
+  const [copiado, setCopiado] = useState(false);
+
+  const copiar = async () => {
+    try {
+      await navigator.clipboard.writeText(pin);
+      setCopiado(true);
+      setTimeout(() => setCopiado(false), 2000);
+    } catch {
+      // Sin permiso de portapapeles queda leerlo de la pantalla.
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={transition.enter}
+      className="space-y-4"
+    >
+      <Banner tone="warning">
+        Este PIN no se vuelve a mostrar. Entrégaselo al conductor por un canal distinto del que usa
+        para su código.
+      </Banner>
+
+      <div className="rounded-lg border border-line bg-surface-sunk p-5 text-center">
+        <p className="text-caption text-ink-muted">PIN del conductor {code}</p>
+        <p className="mt-1 select-all font-mono text-display font-semibold tracking-[0.25em] text-ink">
+          {pin}
+        </p>
+      </div>
+
+      <div className="flex gap-2">
+        <Button
+          className="flex-1"
+          icon={copiado ? <Check className="size-4" /> : <Copy className="size-4" />}
+          onClick={() => void copiar()}
+        >
+          {copiado ? 'Copiado' : 'Copiar'}
+        </Button>
+        <Button variant="primary" className="flex-1" onClick={onCerrar}>
+          Ya lo anoté
+        </Button>
+      </div>
+    </motion.div>
+  );
+}
+
+/* ----------------------------------------------------- alta de conductor --- */
+
+interface NuevoConductor {
+  code: string;
+  name: string;
+  phone: string;
+  /** Los vehículos que podrá manejar: solo abrirá turno en estos. */
+  vehicleIds: string[];
+}
+
+const VACIO: NuevoConductor = { code: '', name: '', phone: '+57', vehicleIds: [] };
+
+export function NuevoConductorBoton() {
+  const [abierto, setAbierto] = useState(false);
+  const [datos, setDatos] = useState<NuevoConductor>(VACIO);
+  const [creado, setCreado] = useState<{ code: string; pin: string } | null>(null);
+  const [error, setError] = useState<string>();
+  const toast = useToast();
+
+  const vehiculos = useVehiculos(abierto);
+
+  const crear = useMutation({
+    mutationFn: (body: NuevoConductor) =>
+      api.post<{ code: string; pin: string }>('/v1/admin/drivers', body),
+    onSuccess: async (respuesta) => {
+      setCreado({ code: respuesta.code, pin: respuesta.pin });
+      setError(undefined);
+      await actions.refreshDrivers();
+    },
+    onError: (causa: unknown) => {
+      setError(
+        causa instanceof ApiError
+          ? causa.message
+          : 'No se pudo dar de alta. Inténtalo de nuevo.',
+      );
+    },
+  });
+
+  const cerrar = () => {
+    setAbierto(false);
+    setCreado(null);
+    setDatos(VACIO);
+    setError(undefined);
+  };
+
+  const listo =
+    /^[0-9]{1,10}$/.test(datos.code) &&
+    datos.name.trim().length >= 3 &&
+    /^\+\d{8,15}$/.test(datos.phone) &&
+    datos.vehicleIds.length > 0;
+
+  return (
+    <>
+      <Button icon={<UserPlus className="size-4" />} onClick={() => setAbierto(true)}>
+        Nuevo conductor
+      </Button>
+
+      <Sheet
+        open={abierto}
+        onClose={creado ? () => undefined : cerrar}
+        title={creado ? 'Conductor dado de alta' : 'Nuevo conductor'}
+        subtitle={creado ? undefined : 'El PIN se genera solo y se muestra una vez'}
+      >
+        {creado ? (
+          <PinUnaVez
+            code={creado.code}
+            pin={creado.pin}
+            onCerrar={() => {
+              toast.push({ tone: 'positive', title: `Conductor ${creado.code} dado de alta` });
+              cerrar();
+            }}
+          />
+        ) : (
+          <div className="space-y-4">
+            <Field label="Código" htmlFor="code" required hint="El número con el que entra cada mañana.">
+              <Input
+                id="code"
+                inputMode="numeric"
+                placeholder="106"
+                value={datos.code}
+                onChange={(e) => setDatos({ ...datos, code: e.target.value.replace(/\D/g, '') })}
+                className="font-mono"
+              />
+            </Field>
+
+            <Field label="Nombre completo" htmlFor="name" required>
+              <Input
+                id="name"
+                value={datos.name}
+                onChange={(e) => setDatos({ ...datos, name: e.target.value })}
+              />
+            </Field>
+
+            <Field label="Teléfono" htmlFor="phone" required hint="Con indicativo: +573001234567">
+              <Input
+                id="phone"
+                inputMode="tel"
+                value={datos.phone}
+                onChange={(e) => setDatos({ ...datos, phone: e.target.value.replace(/[^\d+]/g, '') })}
+                className="font-mono"
+              />
+            </Field>
+
+            {/* Solo podrá abrir turno o cambiar de carro dentro de estos
+                (18/11/2026). Un vehículo nuevo se da de alta antes en la
+                pestaña Vehículos de Flota. */}
+            <Field
+              label="Vehículos que puede manejar"
+              htmlFor="vehiculos-nuevo"
+              required
+              hint="Solo podrá abrir turno o cambiar de carro en estos. ¿Falta uno? Créalo en la pestaña Vehículos."
+            >
+              <SelectorDeVehiculos
+                id="vehiculos-nuevo"
+                value={datos.vehicleIds}
+                onChange={(vehicleIds) => setDatos({ ...datos, vehicleIds })}
+                vehiculos={vehiculos.data ?? []}
+                cargando={vehiculos.isLoading}
+              />
+            </Field>
+
+            {error ? <Banner tone="critical">{error}</Banner> : null}
+
+            <Button
+              variant="primary"
+              size="lg"
+              className="w-full"
+              disabled={!listo}
+              loading={crear.isPending}
+              onClick={() => crear.mutate(datos)}
+            >
+              Dar de alta
+            </Button>
+          </div>
+        )}
+      </Sheet>
+    </>
+  );
+}
+
+/* --------------------------------------------- gestión de un conductor --- */
+
+interface Dispositivo {
+  id: string;
+  label: string;
+  lastSeenAt: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+  recibeAvisos: boolean;
+}
+
+/**
+ * Suspensión por el reglamento interno: la desactivación con fecha de vuelta.
+ *
+ * Se elige en días porque así la piden («tres días»), contados desde ahora,
+ * y debajo se ve la fecha exacta en que vuelve antes de confirmar. El motivo
+ * es obligatorio: es una sanción y tiene que poder explicarse después. Al
+ * cumplirse vuelve solo; «Levantar» es para perdonar antes de tiempo.
+ */
+function Suspension({ driver }: { driver: Driver }) {
+  const toast = useToast();
+  const [abierta, setAbierta] = useState(false);
+  const [dias, setDias] = useState<number>(3);
+  const [otra, setOtra] = useState('');
+  const [motivo, setMotivo] = useState('');
+
+  const diasElegidos = otra ? Number(otra) : dias;
+  const diasValidos = Number.isInteger(diasElegidos) && diasElegidos >= 1 && diasElegidos <= MAX_DIAS_SUSPENSION;
+  const motivoValido = motivo.trim().length >= 5;
+
+  const suspender = useMutation({
+    mutationFn: () =>
+      api.post<{ suspendidoHasta: string }>(`/v1/admin/drivers/${driver.id}/suspension`, {
+        dias: diasElegidos,
+        motivo: motivo.trim(),
+      }),
+    onSuccess: async (r) => {
+      await actions.refreshDrivers();
+      setAbierta(false);
+      setOtra('');
+      setMotivo('');
+      toast.push({
+        tone: 'warning',
+        title: `Suspendido hasta el ${finDeSuspension(r.suspendidoHasta)}`,
+        description: 'Sale de las oleadas ya y no puede entrar a la aplicación. Una carrera en curso la termina.',
+      });
+    },
+    onError: (error) =>
+      toast.push({
+        tone: 'critical',
+        title: 'No se pudo suspender',
+        description: error instanceof ApiError ? error.message : undefined,
+      }),
+  });
+
+  const levantar = useMutation({
+    mutationFn: () => api.del(`/v1/admin/drivers/${driver.id}/suspension`),
+    onSuccess: async () => {
+      await actions.refreshDrivers();
+      toast.push({ tone: 'positive', title: 'Suspensión levantada', description: 'Ya puede volver a trabajar.' });
+    },
+    onError: () => toast.push({ tone: 'critical', title: 'No se pudo levantar la suspensión' }),
+  });
+
+  if (driver.suspendidoHasta) {
+    return (
+      <div className="tone-warning -mx-3 flex items-start justify-between gap-3 border-y border-[var(--tone-line)] bg-[var(--tone-bg)] px-3 py-3 first:-mt-3 first:border-t-0">
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 text-base font-medium text-[var(--tone-ink)]">
+            <Ban className="size-3.5 shrink-0" />
+            Suspendido hasta el {finDeSuspension(driver.suspendidoHasta)}
+          </p>
+          {driver.motivoSuspension ? (
+            <p className="mt-0.5 text-micro text-ink-secondary">{driver.motivoSuspension}</p>
+          ) : null}
+          <p className="mt-0.5 text-micro text-ink-muted">Vuelve solo al cumplirse la fecha.</p>
+        </div>
+        <Button size="sm" variant="secondary" loading={levantar.isPending} onClick={() => levantar.mutate()}>
+          Levantar
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-line pt-3 first:border-t-0 first:pt-0">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-base text-ink">Suspender por un tiempo</p>
+          <p className="text-micro text-ink-muted">
+            Por el reglamento interno: no recibe carreras ni entra a la aplicación hasta la fecha, y vuelve solo.
+          </p>
+        </div>
+        {!abierta ? (
+          <Button size="sm" variant="secondary" icon={<Ban className="size-4" />} onClick={() => setAbierta(true)}>
+            Suspender
+          </Button>
+        ) : null}
+      </div>
+
+      {abierta ? (
+        <form
+          className="mt-3 space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (diasValidos && motivoValido) suspender.mutate();
+          }}
+        >
+          <Field label="Cuántos días" hint={`De 1 a ${MAX_DIAS_SUSPENSION}, contados desde ahora.`}>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {DIAS_DE_SUSPENSION.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => {
+                    setDias(n);
+                    setOtra('');
+                  }}
+                  className={cn(
+                    'h-8 rounded-md border px-3 text-caption font-medium transition-colors',
+                    !otra && dias === n
+                      ? 'border-[var(--brand)] bg-brand text-on-brand'
+                      : 'border-line-strong bg-surface text-ink hover:bg-surface-sunk',
+                  )}
+                >
+                  {n} {n === 1 ? 'día' : 'días'}
+                </button>
+              ))}
+              <div className="w-20">
+                <Input
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={MAX_DIAS_SUSPENSION}
+                  placeholder="Otro"
+                  aria-label="Otra cantidad de días"
+                  value={otra}
+                  onChange={(e) => setOtra(e.target.value.replace(/\D/g, '').slice(0, 2))}
+                  className="h-8"
+                />
+              </div>
+            </div>
+          </Field>
+
+          <Field label="Motivo" htmlFor="motivo-suspension" required>
+            <Textarea
+              id="motivo-suspension"
+              rows={2}
+              maxLength={280}
+              placeholder="Qué falta del reglamento se sanciona"
+              value={motivo}
+              onChange={(e) => setMotivo(e.target.value)}
+            />
+          </Field>
+
+          <p className="text-caption text-ink-secondary">
+            {diasValidos
+              ? // Sin punto final: la hora ya termina en «p. m.».
+                `Vuelve a trabajar el ${finDeSuspension(new Date(Date.now() + diasElegidos * 86_400_000))}`
+              : `Escribe entre 1 y ${MAX_DIAS_SUSPENSION} días.`}
+          </p>
+
+          <div className="flex justify-end gap-2">
+            <Button type="button" size="sm" variant="ghost" onClick={() => setAbierta(false)}>
+              Cancelar
+            </Button>
+            <Button
+              type="submit"
+              size="sm"
+              variant="danger"
+              disabled={!diasValidos || !motivoValido}
+              loading={suspender.isPending}
+            >
+              {diasValidos ? `Suspender ${diasElegidos} ${diasElegidos === 1 ? 'día' : 'días'}` : 'Suspender'}
+            </Button>
+          </div>
+        </form>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Lo que se le puede hacer a un conductor, según el rol: `gestionar` es todo
+ * menos suspender, y `suspender` es solo eso.
+ */
+export function GestionConductor({
+  driver,
+  gestionar,
+  suspender,
+  eliminar = false,
+  rideCode,
+}: {
+  driver: Driver;
+  gestionar: boolean;
+  suspender: boolean;
+  /** Si quien mira tiene «Eliminar conductores». */
+  eliminar?: boolean;
+  /** Su carrera en curso, si tiene: con ella no se puede eliminar. */
+  rideCode?: string;
+}) {
+  const [pinNuevo, setPinNuevo] = useState<string | null>(null);
+  const toast = useToast();
+  const qc = useQueryClient();
+
+  const dispositivos = useQuery({
+    queryKey: ['dispositivos', driver.id],
+    queryFn: () => api.get<Dispositivo[]>(`/v1/admin/drivers/${driver.id}/devices`),
+    enabled: gestionar,
+  });
+
+  const reiniciarPin = useMutation({
+    mutationFn: () => api.post<{ pin: string }>(`/v1/admin/drivers/${driver.id}/pin`),
+    onSuccess: (r) => setPinNuevo(r.pin),
+    onError: () => toast.push({ tone: 'critical', title: 'No se pudo reiniciar el PIN' }),
+  });
+
+  const cambiarActivo = useMutation({
+    mutationFn: (activo: boolean) => api.patch(`/v1/admin/drivers/${driver.id}`, { active: activo }),
+    onSuccess: async (_r, activo) => {
+      await actions.refreshDrivers();
+      toast.push({
+        tone: activo ? 'positive' : 'warning',
+        title: activo ? 'Conductor activado' : 'Conductor desactivado',
+        description: activo
+          ? undefined
+          : 'No recibirá ofertas nuevas. Una carrera en curso no se interrumpe.',
+      });
+    },
+    onError: () => toast.push({ tone: 'critical', title: 'No se pudo cambiar el estado' }),
+  });
+
+  const cambiarPrueba = useMutation({
+    mutationFn: (esPrueba: boolean) => api.patch(`/v1/admin/drivers/${driver.id}`, { esPrueba }),
+    onSuccess: async (_r, esPrueba) => {
+      await actions.refreshDrivers();
+      toast.push({
+        tone: 'info',
+        title: esPrueba ? 'Marcado como cuenta de prueba' : 'Ya no es cuenta de prueba',
+        description: esPrueba
+          ? 'Despacha igual que siempre, pero Reportes puede dejar fuera sus carreras.'
+          : 'Sus carreras vuelven a contar en Reportes.',
+      });
+    },
+    onError: () => toast.push({ tone: 'critical', title: 'No se pudo cambiar la marca de prueba' }),
+  });
+
+  const cambiarPago = useMutation({
+    mutationFn: (acepta: boolean) =>
+      api.patch(`/v1/admin/drivers/${driver.id}`, { aceptaPagoElectronico: acepta }),
+    onSuccess: async (_r, acepta) => {
+      await actions.refreshDrivers();
+      toast.push({
+        tone: 'info',
+        title: acepta ? 'Recibe pagos electrónicos' : 'Ya no recibe pagos electrónicos',
+        description: acepta
+          ? 'Desde ahora también le llegan las carreras que se pagan así.'
+          : 'Las carreras con pago electrónico ya no se le ofrecen.',
+      });
+    },
+    onError: () => toast.push({ tone: 'critical', title: 'No se pudo cambiar el medio de pago' }),
+  });
+
+  const revocar = useMutation({
+    mutationFn: (deviceId: string) => api.post(`/v1/admin/drivers/devices/${deviceId}/revoke`),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['dispositivos', driver.id] });
+      await actions.refreshDrivers();
+      toast.push({
+        tone: 'positive',
+        title: 'Dispositivo revocado',
+        description: 'Ese celular deja de recibir ofertas y su acceso caduca.',
+      });
+    },
+    onError: () => toast.push({ tone: 'critical', title: 'No se pudo revocar' }),
+  });
+
+  const vivos = (dispositivos.data ?? []).filter((d) => !d.revokedAt);
+  /*
+   * Un conductor tiene un solo celular activo (17/11/2026): entrar en otro
+   * cierra el anterior. Los cerrados se muestran debajo, en gris y sin
+   * botón, solo los últimos: sirven para ver cuándo cambió de teléfono.
+   */
+  const anteriores = (dispositivos.data ?? [])
+    .filter((d) => d.revokedAt)
+    .sort((a, b) => (b.revokedAt ?? '').localeCompare(a.revokedAt ?? ''))
+    .slice(0, 3);
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <SectionLabel>Gestión</SectionLabel>
+
+        <div className="mt-2 space-y-3 rounded-md border border-line p-3">
+          {gestionar ? (
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-base text-ink">Puede recibir carreras</p>
+                <p className="text-micro text-ink-muted">
+                  {driver.active
+                    ? 'Al desactivarlo sale de las oleadas de inmediato. Una carrera en curso no se interrumpe.'
+                    : 'Está desactivado: no entra en ninguna oleada.'}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant={driver.active ? 'secondary' : 'primary'}
+                loading={cambiarActivo.isPending}
+                onClick={() => cambiarActivo.mutate(!driver.active)}
+              >
+                {driver.active ? 'Desactivar' : 'Activar'}
+              </Button>
+            </div>
+          ) : null}
+
+          {suspender ? <Suspension driver={driver} /> : null}
+
+          {gestionar ? (
+            <>
+              <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
+                <div className="min-w-0">
+                  <p className="flex items-center gap-1.5 text-base text-ink">
+                    <CreditCard className="size-3.5 shrink-0 text-ink-muted" />
+                    Recibe pagos electrónicos
+                  </p>
+                  <p className="text-micro text-ink-muted">
+                    {driver.aceptaPagoElectronico
+                      ? 'Le llegan también las carreras de clientes que pagan con Nequi, transferencia o datáfono.'
+                      : 'No le llegan las carreras de clientes que pagan con pago electrónico.'}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant={driver.aceptaPagoElectronico ? 'secondary' : 'primary'}
+                  loading={cambiarPago.isPending}
+                  onClick={() => cambiarPago.mutate(!driver.aceptaPagoElectronico)}
+                >
+                  {driver.aceptaPagoElectronico ? 'Quitar' : 'Habilitar'}
+                </Button>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
+                <div className="min-w-0">
+                  <p className="text-base text-ink">Cuenta de prueba</p>
+                  <p className="text-micro text-ink-muted">
+                    {driver.esPrueba
+                      ? 'Sus carreras, ofertas y turnos no cuentan en Reportes con «No incluir pruebas».'
+                      : 'Márcala si el equipo la usa para probar la aplicación.'}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={cambiarPrueba.isPending}
+                  onClick={() => cambiarPrueba.mutate(!driver.esPrueba)}
+                >
+                  {driver.esPrueba ? 'Quitar marca' : 'Marcar'}
+                </Button>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
+                <div className="min-w-0">
+                  <p className="text-base text-ink">PIN personal</p>
+                  <p className="text-micro text-ink-muted">
+                    No se puede consultar: solo existe su hash. Si lo olvidó, genera otro.
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  icon={<KeyRound className="size-4" />}
+                  loading={reiniciarPin.isPending}
+                  onClick={() => reiniciarPin.mutate()}
+                >
+                  Reiniciar
+                </Button>
+              </div>
+            </>
+          ) : null}
+        </div>
+
+        {pinNuevo ? (
+          <div className="mt-3">
+            <PinUnaVez code={driver.code} pin={pinNuevo} onCerrar={() => setPinNuevo(null)} />
+          </div>
+        ) : null}
+      </div>
+
+      {gestionar ? <VehiculosPermitidos driver={driver} /> : null}
+
+      {gestionar ? (
+        <div>
+          <SectionLabel>Celular activo</SectionLabel>
+          <div className="mt-2 space-y-2">
+            {dispositivos.isLoading ? (
+              <p className="text-caption text-ink-muted">Cargando…</p>
+            ) : vivos.length === 0 ? (
+              <p className="rounded-md border border-line p-3 text-base text-ink-muted">
+                Ninguno activo. El conductor registra el suyo al entrar a la aplicación.
+              </p>
+            ) : (
+              vivos.map((d) => (
+                <div
+                  key={d.id}
+                  className="flex items-start justify-between gap-3 rounded-md border border-line p-3"
+                >
+                  <div className="min-w-0">
+                    <p className="flex items-center gap-1.5 truncate text-base text-ink">
+                      <Smartphone className="size-3.5 shrink-0 text-ink-muted" />
+                      {/* El `label` es el user-agent: largo e ilegible entero. */}
+                      {d.label.slice(0, 48)}
+                    </p>
+                    <p className="text-micro text-ink-muted">
+                      {d.lastSeenAt ? `Visto ${formatRelative(d.lastSeenAt)}` : 'Sin actividad'}
+                      {d.recibeAvisos ? ' · recibe avisos' : ' · sin avisos'}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    loading={revocar.isPending}
+                    onClick={() => revocar.mutate(d.id)}
+                  >
+                    Revocar
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+
+          {anteriores.length > 0 ? (
+            <div className="mt-3">
+              <p className="text-micro font-semibold uppercase tracking-[0.07em] text-ink-muted">Anteriores</p>
+              <ul className="mt-1.5 space-y-1">
+                {anteriores.map((d) => (
+                  <li key={d.id} className="flex items-center gap-1.5 truncate text-caption text-ink-muted">
+                    <Smartphone className="size-3 shrink-0" />
+                    <span className="truncate">{d.label.slice(0, 40)}</span>
+                    <span className="ml-auto shrink-0">cerrado {formatRelative(d.revokedAt!)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {eliminar ? <EliminarConductor driver={driver} rideCode={rideCode} /> : null}
+    </div>
+  );
+}
+
+/**
+ * Los vehículos que el conductor puede manejar (18/11/2026). Solo abre turno
+ * o cambia de carro dentro de estos; la API lo comprueba, esto solo los
+ * elige. Los del listado maestro van marcados: si se quitan aquí, la próxima
+ * carga del listado los vuelve a poner.
+ */
+function VehiculosPermitidos({ driver }: { driver: Driver }) {
+  const toast = useToast();
+  const vehiculos = useVehiculos();
+  const actuales = (driver.moviles ?? []).map((m) => m.vehiculoId).filter((x): x is string => Boolean(x));
+  const [elegidos, setElegidos] = useState<string[]>(actuales);
+  const [editando, setEditando] = useState(false);
+
+  const cambiado =
+    elegidos.length !== actuales.length || elegidos.some((x) => !actuales.includes(x));
+  const delListado = new Set((driver.moviles ?? []).filter((m) => m.origen === 'listado').map((m) => m.vehiculoId));
+  const quitaDelListado = actuales.some((x) => delListado.has(x) && !elegidos.includes(x));
+
+  const guardar = useMutation({
+    mutationFn: () => api.post<{ placas: string[] }>(`/v1/admin/drivers/${driver.id}/vehicles`, { vehicleIds: elegidos }),
+    onSuccess: async (r) => {
+      await actions.refreshDrivers();
+      setEditando(false);
+      toast.push({
+        tone: 'positive',
+        title: 'Vehículos permitidos guardados',
+        description: r.placas.length ? `Puede manejar: ${r.placas.join(', ')}.` : 'No podrá abrir turno hasta que le asignes uno.',
+      });
+    },
+    onError: (e) =>
+      toast.push({ tone: 'critical', title: 'No se pudo guardar', description: e instanceof ApiError ? e.message : undefined }),
+  });
+
+  const moviles = driver.moviles ?? [];
+
+  return (
+    <div>
+      <SectionLabel>Vehículos que puede manejar</SectionLabel>
+      <div className="mt-2 space-y-3 rounded-md border border-line p-3">
+        {!editando ? (
+          <>
+            {moviles.length === 0 ? (
+              <Banner tone="warning" icon={<Car className="size-4" />}>
+                No tiene ninguno: no puede abrir turno hasta que le asignes uno.
+              </Banner>
+            ) : (
+              <ul className="flex flex-wrap gap-1.5">
+                {moviles.map((m) => (
+                  <li
+                    key={m.vehiculoId ?? m.placa}
+                    className={cn(
+                      'inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 font-mono text-caption',
+                      m.activo ? 'text-ink' : 'text-ink-muted line-through',
+                    )}
+                    title={m.origen === 'listado' ? 'Del listado maestro' : 'Asignado en el panel'}
+                  >
+                    {m.interno ? `${m.interno} · ${m.placa}` : m.placa}
+                    {m.origen === 'listado' ? <span className="font-sans text-micro text-ink-muted">listado</span> : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-micro text-ink-muted">
+                Solo puede abrir turno o cambiar de carro en estos. Uno inactivo aparece tachado.
+              </p>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<Car className="size-4" />}
+                onClick={() => {
+                  setElegidos(actuales);
+                  setEditando(true);
+                }}
+              >
+                Cambiar
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <SelectorDeVehiculos
+              value={elegidos}
+              onChange={setElegidos}
+              vehiculos={vehiculos.data ?? []}
+              cargando={vehiculos.isLoading}
+            />
+            {quitaDelListado ? (
+              <Banner tone="info">
+                Quitas un vehículo que viene del listado maestro: la próxima carga del listado se lo vuelve a asignar.
+              </Banner>
+            ) : null}
+            {elegidos.length === 0 ? (
+              <Banner tone="warning">Sin ningún vehículo no podrá abrir turno.</Banner>
+            ) : null}
+            <div className="flex justify-end gap-2">
+              <Button size="sm" variant="secondary" disabled={guardar.isPending} onClick={() => setEditando(false)}>
+                Cancelar
+              </Button>
+              <Button size="sm" variant="primary" disabled={!cambiado} loading={guardar.isPending} onClick={() => guardar.mutate()}>
+                Guardar
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Eliminar al conductor: lo último de la tarjeta, aparte de lo demás, porque
+ * no se puede deshacer (18/11/2026).
+ *
+ * Dos pasos, como cancelar una carrera desde la PWA: el botón solo abre la
+ * ventana, y ahí hay que escribir el motivo y el código del conductor. El
+ * código escrito a mano es lo que evita eliminar a otro por un clic en la
+ * tarjeta equivocada; la API lo vuelve a comprobar.
+ */
+function EliminarConductor({ driver, rideCode }: { driver: Driver; rideCode?: string }) {
+  const toast = useToast();
+  const [abierta, setAbierta] = useState(false);
+  const [motivo, setMotivo] = useState('');
+  const [confirmacion, setConfirmacion] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const listo = motivo.trim().length >= 5 && confirmacion.trim() === driver.code && !rideCode;
+
+  const cerrar = () => {
+    setAbierta(false);
+    setMotivo('');
+    setConfirmacion('');
+    setError(null);
+  };
+
+  const eliminar = useMutation({
+    mutationFn: () =>
+      api.post<{ code: string; modo: 'borrado' | 'baja' }>(`/v1/admin/drivers/${driver.id}/eliminar`, {
+        motivo: motivo.trim(),
+        confirmacion: confirmacion.trim(),
+      }),
+    onSuccess: async (r) => {
+      cerrar();
+      // Al refrescar desaparece de la lista y la tarjeta se cierra sola.
+      await actions.refreshDrivers();
+      toast.push({
+        tone: 'positive',
+        title: `Conductor ${r.code} eliminado`,
+        description:
+          r.modo === 'baja'
+            ? 'Sus carreras pasadas se conservan con su nombre; sus datos personales se borraron.'
+            : 'No tenía carreras ni turnos: se borró por completo.',
+      });
+    },
+    onError: (e) =>
+      setError((e instanceof ApiError && e.message) || 'No se pudo eliminar. Inténtalo de nuevo.'),
+  });
+
+  return (
+    <div>
+      <SectionLabel>Eliminar conductor</SectionLabel>
+      <div className="tone-critical mt-2 flex items-center justify-between gap-3 rounded-md border border-[var(--tone-line)] p-3">
+        <div className="min-w-0">
+          <p className="text-base text-ink">Dar de baja definitiva</p>
+          <p className="text-micro text-ink-muted">
+            Sale de Flota, pierde el acceso y se borran sus datos personales. No se puede deshacer.
+          </p>
+        </div>
+        <Button size="sm" variant="danger" icon={<Trash2 className="size-4" />} onClick={() => setAbierta(true)}>
+          Eliminar
+        </Button>
+      </div>
+
+      <Modal
+        open={abierta}
+        onClose={() => {
+          if (!eliminar.isPending) cerrar();
+        }}
+        title={`¿Eliminar a ${driver.name}?`}
+        subtitle={`Código ${driver.code}`}
+        footer={
+          <>
+            <Button variant="secondary" disabled={eliminar.isPending} onClick={cerrar}>
+              No, volver
+            </Button>
+            <Button
+              variant="danger"
+              icon={<Trash2 className="size-4" />}
+              disabled={!listo}
+              loading={eliminar.isPending}
+              onClick={() => {
+                setError(null);
+                eliminar.mutate();
+              }}
+            >
+              Sí, eliminar conductor
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          {rideCode ? (
+            <Banner tone="warning" icon={<Ban className="size-4" />}>
+              Tiene la carrera {rideCode} en curso. Espera a que termine o cancélala antes de eliminarlo.
+            </Banner>
+          ) : null}
+
+          <div className="space-y-1.5 text-base text-ink-secondary">
+            <p>Al eliminarlo:</p>
+            <ul className="list-disc space-y-1 pl-5">
+              <li>Desaparece de Flota y deja de recibir carreras.</li>
+              <li>Se cierran sus celulares y su sesión, y ya no puede entrar a la aplicación.</li>
+              <li>Se borran su cédula, teléfono, licencia y PIN.</li>
+              <li>
+                Sus carreras pasadas se conservan con su nombre y código, y el código {driver.code} no se le vuelve a
+                asignar a nadie.
+              </li>
+            </ul>
+            <p className="text-ink">Queda registrado en la auditoría quién lo eliminó, cuándo y por qué.</p>
+          </div>
+
+          <Field label="Motivo" htmlFor="motivo-eliminar" required hint="Queda en la auditoría.">
+            <Textarea
+              id="motivo-eliminar"
+              rows={3}
+              maxLength={300}
+              value={motivo}
+              onChange={(e) => setMotivo(e.target.value)}
+              placeholder="Por ejemplo: se retiró de la empresa"
+            />
+          </Field>
+
+          <Field label={`Para confirmar, escribe su código: ${driver.code}`} htmlFor="confirmar-eliminar" required>
+            <Input
+              id="confirmar-eliminar"
+              inputMode="numeric"
+              autoComplete="off"
+              value={confirmacion}
+              onChange={(e) => setConfirmacion(e.target.value)}
+              className="font-mono"
+            />
+          </Field>
+
+          {error ? (
+            <Banner tone="critical" icon={<Ban className="size-4" />}>
+              {error}
+            </Banner>
+          ) : null}
+        </div>
+      </Modal>
+    </div>
+  );
+}

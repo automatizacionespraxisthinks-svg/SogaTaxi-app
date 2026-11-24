@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="es-CO">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Un solo tema, claro (HU-UI-01): el modo oscuro del sistema no lo cambia. -->
+    <meta name="color-scheme" content="light" />
+    <!-- El color sale de --brand en tokens.css; lo pone vite.config.ts al servir. -->
+    <meta name="theme-color" content="%COLOR_TEMA%" />
+    <meta name="description" content="Panel de operación de SogaTaxi S.A.: despacho, flota y reportes." />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png" />
+    <title>Operación · SogaTaxi</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

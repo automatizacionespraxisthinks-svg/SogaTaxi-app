@@ -1,0 +1,69 @@
+import type { Point } from './geo';
+import type { VehicleType } from './ride';
+
+export const DRIVER_STATUSES = ['OFF_SHIFT', 'AVAILABLE', 'ON_RIDE', 'PAUSED'] as const;
+export type DriverStatus = (typeof DRIVER_STATUSES)[number];
+
+/**
+ * El taxi del turno abierto. Sin turno no hay taxi: entonces solo viene la
+ * placa «—» y lo demás queda sin dato, en vez de inventar «sedán, 4
+ * pasajeros, activo» como hacía el panel (17/11/2026).
+ */
+export interface Vehicle {
+  plate: string;
+  type?: VehicleType;
+  capacity?: number;
+  active?: boolean;
+}
+
+export interface MovilVinculado {
+  /** El vehículo: lo que se manda al fijar los permitidos. */
+  vehiculoId?: string;
+  /** Si lo puso el listado maestro o la oficina en el panel. */
+  origen?: 'listado' | 'panel';
+  /** El número del móvil en la empresa: «002». */
+  interno?: string;
+  placa: string;
+  marca?: string;
+  modelo?: number;
+  rol: 'conductor' | 'relevador';
+  activo: boolean;
+}
+
+export interface Driver {
+  id: string;
+  /** Código interno del conductor; junto con placa y PIN forma el acceso (§8.1). */
+  code: string;
+  name: string;
+  phone: string;
+  status: DriverStatus;
+  vehicle: Vehicle;
+  /** Última posición conocida. Solo se registra con turno abierto (§9.2). */
+  position?: Point;
+  /** Antigüedad de la posición en segundos; >60 s descarta al candidato (§5.2). */
+  positionAgeSeconds?: number;
+  /** Si sigue trabajando. Un conductor inactivo no entra en ninguna oleada. */
+  active: boolean;
+  /** Cuenta con la que el equipo prueba; Reportes la puede dejar fuera. */
+  esPrueba?: boolean;
+  /** Recibe pagos electrónicos: solo a estos les llegan las carreras que se pagan así. */
+  aceptaPagoElectronico?: boolean;
+  /**
+   * Suspendido por el reglamento interno hasta esta fecha (ISO). Solo viene
+   * mientras la suspensión sigue en pie; una ya cumplida no se manda.
+   */
+  suspendidoHasta?: string;
+  motivoSuspension?: string;
+  /** Del listado maestro: vencimiento de la licencia (`AAAA-MM-DD`) y su restricción. */
+  licenciaVence?: string;
+  licenciaRestriccion?: string;
+  /** Los móviles a los que está vinculado, como conductor o relevador. */
+  moviles?: MovilVinculado[];
+  shiftStartedAt?: string;
+  /**
+   * El turno abierto es en un móvil al que el listado maestro no lo vincula
+   * (17/11/2026): se le deja trabajar, y la oficina lo ve marcado.
+   */
+  fueraDeListado?: boolean;
+  deviceRegistered: boolean;
+}

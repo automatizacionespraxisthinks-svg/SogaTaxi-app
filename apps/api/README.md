@@ -1,0 +1,550 @@
+# @tax/api — monolito modular
+
+Un solo proceso Node con la API, el motor de despacho, el relay del outbox y
+el socket de tiempo real, como fija el ADR-01. Reutiliza el PostgreSQL 16 y el
+Redis 7 que ya existen en el VPS; no añade ningún servicio más.
+
+## Arrancar en local
+
+```bash
+pnpm db:up
+```
+
+Levanta PostgreSQL 16 y Redis 7 en contenedores **solo para desarrollo**
+(`docker-compose.dev.yml`). En el VPS no se despliega ese archivo: allí la
+base `tax` vive dentro del PostgreSQL existente con un usuario propio.
+
+```bash
+cp apps/api/.env.example apps/api/.env
+```
+
+```bash
+pnpm --filter @tax/api db:migrate && pnpm --filter @tax/api db:seed
+```
+
+El `seed` imprime una clave de API para n8n **una sola vez**: de ahí en
+adelante solo queda su hash Argon2 en la base.
+
+```bash
+pnpm dev:api
+```
+
+## Módulos
+
+Ocho módulos con fronteras estrictas. Cada uno expone una interfaz y ninguno
+lee las tablas de otro (§4.1).
+
+| Módulo | Es dueño de | Expone |
+| --- | --- | --- |
+| `rides` | Ciclo de vida, edición de dirección, historial | `POST /v1/rides`, comandos de estado |
+| `dispatch` | Oleadas, candidatos, ofertas, aceptación atómica | Aceptar, rechazar, relanzar, asignar |
+| `fleet` | Conductores, vehículos, turnos, posición en vivo | Búsqueda de candidatos por radio y tipo |
+| `pricing` | Tabla de precios, polígonos, catálogo de lugares | `quote()`, `classify()` |
+| `integrations` | Outbox y entrega firmada a n8n | `enqueue()` dentro de una transacción |
+| `identity` | Usuarios, roles, sesiones, claves de API | Guardas de autorización |
+| `reports` | Consultas de lectura y exportaciones | Agregados en SQL |
+| `audit` | Bitácora de solo inserción con hash encadenado | Lectura para administradores |
+
+## Las tres garantías
+
+Son las que el documento declara críticas y las únicas que no se pueden
+simplificar.
+
+### 1. Exclusividad: decide la base, no la aplicación
+
+`DispatchService.accept` es una sola sentencia condicional. Si dos conductores
+aceptan a la vez, PostgreSQL serializa los `UPDATE` y solo el primero
+encuentra la fila en `NOTIFIED`; al segundo le devuelve cero filas.
+
+```sql
+update rides
+   set status = 'ASSIGNED', driver_id = $driver, assigned_at = now(), version = version + 1
+ where id = $ride and status = 'NOTIFIED'
+   and exists (select 1 from ride_offers o
+                where o.ride_id = $ride and o.driver_id = $driver
+                  and o.expires_at > now() and o.revoked_at is null)
+returning id;
+```
+
+Detrás hay un respaldo estructural: el índice único parcial
+`one_active_ride_per_driver`. Aunque la lógica fallara, la base rechaza la
+segunda asignación.
+
+Verificado con 50 conductores concurrentes:
+
+```bash
+pnpm --filter @tax/api test
+```
+
+### 2. Entrega de eventos: outbox transaccional
+
+`OutboxService.enqueue` recibe siempre la transacción que está cambiando el
+dominio, así que el evento y el cambio se confirman o se descartan juntos. Eso
+es lo que impide que el agente prometa algo que no ocurrió, y que algo ocurra
+sin que nadie avise.
+
+El relay entrega con cabeceras firmadas (`X-Tax-Event-Id`, `X-Tax-Timestamp`,
+`X-Tax-Signature`), reintenta con backoff de 1 s a 15 min durante 10 intentos
+y entierra el evento en cola muerta, visible en el panel. Un barrido cada 30 s
+recoge lo que quedara pendiente tras un reinicio: el aviso por Redis es una
+optimización, la verdad está en Postgres.
+
+### 3. Temporizadores que sobreviven a un reinicio
+
+Las oleadas vencen con trabajos diferidos de BullMQ sobre Redis, no con
+`setTimeout`. Si el contenedor cae con una oleada en vuelo, al levantar vence
+igual y la carrera sigue su camino.
+
+## Idempotencia de entrada (§7.1)
+
+La misma `Idempotency-Key` con la misma petición devuelve la respuesta
+original sin volver a ejecutar nada, con la cabecera `Idempotent-Replayed:
+true`; con una petición distinta es un 409 `IDEMPOTENCY_MISMATCH`, porque
+significa que quien llama está reutilizando una clave por error. Las claves
+viven 24 h y van por ruta: la misma clave en crear y en cancelar son dos
+peticiones.
+
+- **La clave se reserva antes de ejecutar.** Antes se guardaba justo después
+  de responder, sin esperar, y una repetición que llegara en ese instante no
+  la encontraba: volvía a crear y chocaba con `RIDE_ALREADY_ACTIVE`. Ahora una
+  repetición que llega mientras la primera sigue en curso espera su respuesta
+  (hasta 15 s; pasado eso, 409 `IDEMPOTENCY_IN_PROGRESS`, que es reintentable).
+  Si la ejecución falla, la reserva se suelta: los errores no se guardan. Una
+  reserva sin respuesta durante 60 s es de un proceso caído y se retoma.
+- **Ajuste a la §7.1 en `POST /v1/rides`:** no se compara el cuerpo entero
+  sino su huella, el teléfono y el punto compartido. En el flujo de n8n el
+  cuerpo lo redacta el agente de IA (`$fromAI`), y su prompt le pide volver a
+  llamar ante cualquier error: la segunda vez la dirección o las notas salen
+  con otras palabras. Con el cuerpo entero, esa repetición daba 409 y el agente
+  le decía al cliente que hubo un inconveniente mientras el taxi ya estaba
+  pedido. La clave ya identifica el turno de la conversación; la huella solo
+  confirma que no se reutilizó para otro cliente u otro punto. Cancelar y
+  cambiar la dirección siguen comparando el cuerpo entero.
+
+`e2e-idempotencia.ts` reproduce los casos del flujo: repetición al instante,
+con otra redacción, dos a la vez, clave reutilizada, error que no se guarda y
+la misma clave en otra ruta.
+
+### Varios taxis en un pedido: `cantidad` (11/11/2026)
+
+`POST /v1/rides` acepta `cantidad` (1 a 5): cuántos taxis van a ese punto. La
+API los crea **en la misma transacción, o ninguno**: si no caben en el tope de
+5 por teléfono responde `MAX_ACTIVE_RIDES` con `errors: [{ path: 'cantidad',
+message: 'cupo: N' }]` y no deja ninguno a medias. Cada uno es una carrera
+completa (su código, su `ride.created`, su despacho, sus avisos) y lleva en
+las notas «Taxi i de N en el mismo punto.», puesta por la API. Se numeran
+desde `numeroEnPedido`, así que «dos en la terminal y uno en el hotel» son dos
+llamadas: `cantidad: 2, numeroEnPedido: 1` y `cantidad: 1, numeroEnPedido: 3`
+(`numeroEnPedido + cantidad - 1` no pasa de 5).
+
+La respuesta con `cantidad: 1` es la de siempre. Con más, es la primera
+carrera (para que quien lea `id` y `code` siga funcionando) más `cantidad` y
+`rides` con todas, en orden. La huella de idempotencia incluye la cantidad
+cuando es mayor que 1: la misma clave con otra cantidad es
+`IDEMPOTENCY_MISMATCH`.
+
+Antes el agente tenía que llamar cinco veces y numerar bien cada taxi. En
+producción (5/11/2026) acordó 5 taxis, olvidó el número dos turnos después y
+pidió uno. Los flujos de `Actualizados 2026-11-11` piden por cantidad y
+recuerdan el pedido entre turnos (ver el README de la raíz).
+
+`e2e-varios-taxis.ts` cubre el pedido de varios taxis en un mensaje: cinco
+bien numerados (clave `…-1` a `…-5` y `numeroEnPedido` 1 a 5) son cinco
+carreras, el sexto da `MAX_ACTIVE_RIDES`, y las cinco a la vez de un cliente
+nuevo también salen (antes, las que perdían al crear el cliente daban 500).
+Con `cantidad`: cinco en una llamada, el reintento, la cantidad distinta con
+la misma clave, el cupo que no alcanza sin crear a medias, el pedido mixto y
+la numeración que se pasa de 5. Deja escrito lo que pasa si el agente no
+numera: con la misma clave la API devuelve **la misma carrera** con 201 cada
+vez, y con claves distintas pero `numeroEnPedido: 1` las siguientes chocan
+con `RIDE_ALREADY_ACTIVE`.
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-varios-taxis.ts <clave-de-api>
+```
+
+Una trampa al depurar esto: la respuesta repetida sale de una columna `jsonb`,
+y `jsonb` **reordena las claves** al guardarlas (por longitud y luego
+alfabéticamente). Puestas una al lado de la otra, las dos respuestas parecen
+tener campos distintos cuando solo están en otro orden. `e2e-dispatch.ts`
+compara ordenando las claves en profundidad y comprueba que son los mismos 32
+campos con los mismos valores y el mismo código de estado.
+
+## Arreglos críticos de la auditoría (17/11/2026)
+
+Lo que cambia para quien despliega o para n8n:
+
+- **Idempotencia por URL real y por quién llama.** La clave era la plantilla
+  de la ruta (`/v1/rides/:rideId/cancel`), así que la misma
+  `Idempotency-Key` en dos carreras devolvía la respuesta de la primera.
+  «Cancele los 5 taxis» cancelaba uno. Las claves guardadas antes del
+  despliegue no se reconocen: un reintento que cruce el despliegue se ejecuta
+  como nuevo.
+- **Asignación manual** (`POST /v1/rides/:id/assign` y el panel): solo sobre
+  carreras sin conductor (`PENDING`, `NOTIFIED`, `UNASSIGNED`), a un conductor
+  en turno y disponible, con la oferta del intento de despacho en curso.
+  Si no, `INVALID_TRANSITION` o `DRIVER_BUSY`.
+- **Turno**: no se cierra con una carrera tomada (`DRIVER_BUSY`); al cerrarlo
+  se le retiran al conductor sus ofertas pendientes; sin turno abierto no se
+  acepta una carrera.
+- **Outbox**: un evento que quedó «entregando» porque el proceso se cayó se
+  vuelve a intentar a los dos minutos.
+- **Socket de la oficina**: exige segundo factor y contraseña definitiva,
+  como la API. Cada cinco minutos se cortan los sockets cuya sesión ya no vale.
+- **Acceso del conductor**: mismo mensaje y mismo tiempo exista o no el
+  código. Bloqueo de 5 PIN malos por código **y red** durante 15 minutos (en
+  Redis), y de 20 por cuenta (en la base, con suma atómica). Los contadores de
+  la oficina también son atómicos.
+- **Límite de peticiones**: los accesos (`/v1/auth/driver`, `/v1/auth/session`)
+  tienen 20 por minuto y por IP, sin cubos por clave de API inventada. El
+  límite responde 429 `RATE_LIMITED` (antes salía como 500).
+- **`TRUST_PROXY`** (por defecto `loopback, linklocal, uniquelocal`): solo se
+  cree el `X-Forwarded-For` que viene de redes privadas, donde vive Traefik.
+- **Permiso `sistema.tecnico`** para el QR de WAHA, el listado del outbox,
+  `GET /v1/admin/system` y `POST /v1/admin/system/whatsapp/revisar`. El panel
+  ya no pide el outbox.
+- **`GET /v1/rides`** (todas las carreras de todos los clientes) pide el ámbito
+  `rides:list`, que la clave de n8n no lleva.
+- **Foto por enlace**: cada redirección se revisa (máximo tres), no se baja
+  nada de direcciones privadas del servidor y la descarga se corta a los 5 MB.
+  Con `FOTO_HOSTS_PERMITIDOS` solo se aceptan esos servidores; **si Chatwoot
+  entrega las fotos con un nombre interno de Docker, hay que ponerlo ahí** o
+  las fotos se rechazan (la carrera sigue sin foto).
+- **`.dockerignore`** deja fuera todos los `.env.*` y `*.local`.
+
+Prueba: `src/test/e2e-criticos.ts <clave-con-rides:list> <clave-sin-rides:list>`
+(deja la IP con el límite de accesos agotado un minuto).
+
+## Claves de API
+
+Las claves no se crean por HTTP: se emiten desde el servidor, y el secreto se
+imprime una sola vez porque en la base solo queda el hash Argon2 (§8.1).
+
+```bash
+pnpm --filter @tax/api exec tsx src/cli/crear-clave-api.ts n8n rides:write rides:read
+```
+
+El script vive dentro de `src/` para que se compile a `dist/` y exista también
+en el contenedor de producción, donde no hay `tsx`; allí se llama con
+`node dist/cli/crear-clave-api.js`.
+
+Los ámbitos importan: `rides:write` crea carreras, `rides:read` las consulta.
+`rides:list` (listar todas las carreras de todos los clientes) solo lo usan las
+pruebas de extremo a extremo: la clave de n8n no lo lleva, y para correr una
+prueba con una clave creada a mano hay que dárselo:
+`crear-clave-api.ts prueba rides:write rides:read rides:list`.
+Una clave a la que le falte uno recibe `403 FORBIDDEN` con el ámbito que le
+falta en el detalle.
+
+## Pruebas de extremo a extremo
+
+Con la API en marcha y una clave con ambos ámbitos:
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-dispatch.ts <clave-de-api>
+```
+
+Recorre el camino real —turno, posición, creación por el contrato de n8n,
+oleada, aceptación simultánea— y comprueba que exactamente un conductor gana y
+los demás reciben `RIDE_ALREADY_TAKEN`.
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-relanzar.ts <clave-de-api>
+```
+
+Relanzar una carrera que nadie aceptó. Cada lanzamiento es un intento propio
+(`rides.intento_despacho`, `ride_offers.intento`): dentro de un intento no se
+repite conductor, pero un relanzamiento vuelve a contar con quien no contestó.
+Quien rechazó la carrera queda fuera en todos. Antes el índice único no
+llevaba el intento, y relanzar tras una ronda final vencida daba 500 al
+intentar ofrecérsela otra vez al mismo conductor en la misma oleada. Tarda
+unos tres minutos: espera vencimientos reales.
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-oleadas.ts <clave-de-api>
+```
+
+El recorrido de las oleadas, con un solo conductor en turno a unos 19 km:
+fuera de los 12 km de la tercera. Comprueba que cada oleada queda registrada
+en `wave_log` —también las que no hallan a nadie, que antes no dejaban
+rastro—, que las vacías pasan al instante, y que la ronda final llega al
+conductor lejano. Lee `OLEADA_FINAL_A_TODOS` y comprueba la rama que toca:
+pásala con la API arrancada igual que la prueba.
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-geocodificacion.ts <clave-de-api>
+```
+
+El punto de recogida lo resuelve la API, no el agente. Por WhatsApp la gente
+escribe «Cra. 12 A # 31B-14», no coordenadas; antes las resolvía el agente de
+n8n y se las pasaba, ahora manda solo texto. Un modelo que copia coordenadas
+de una respuesta a otra puede cambiar un dígito sin que nadie lo note, y un
+dígito en la cuarta decimal son once metros.
+
+Necesita `GOOGLE_GEOCODING_API_KEY`. **Sin ella la API no adivina**: exige
+coordenadas, como antes, y responde `MISSING_LOCATION` con un detalle que le
+dice al agente que pida la ubicación. Es preferible pedirla a mandar un taxi
+a un punto inventado. La prueba se adapta a si la clave está puesta o no.
+
+El filtro que decide si un punto se acepta está cubierto aparte, en
+`geocoding.spec.ts`: `bounds` solo sesga la búsqueda de Google, no la limita,
+así que una «Carrera 21» puede llegar desde Tunja con toda confianza.
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-destino.ts <clave-de-api>
+```
+
+El destino que se descubre al final. Casi nadie dice a donde va por WhatsApp
+—lo dice ya montado en el carro—, asi que la mayoria de carreras nacen solo
+con punto de partida y el destino se registra cuando el conductor marca
+finalizada, donde quiera que este. De ahi salen `distance_km` y `fare_final`.
+
+Lo que comprueba no es que el numero se guarde, sino las cuatro formas de
+estropearlo: que la posicion del conductor pise un destino que el cliente si
+habia dicho, que `fare_estimate` se sobrescriba y se pierda lo que se le
+prometio, y que un GPS mudo o con una lectura absurda deje al conductor sin
+poder cerrar la carrera con el cliente ya bajandose.
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-pausa.ts <clave-de-api>
+```
+
+La pausa del turno. Lo que comprueba no es que el endpoint responda 200, sino
+que **al conductor en pausa no le llegan carreras** — y, para que eso no pase
+por vacío, repite la misma carrera con el turno reanudado, donde sí tiene que
+ofrecérsela. Aparta a los otros conductores antes: si quedaran disponibles, no
+podría distinguir «al pausado no le ofrecieron» de «le ofrecieron a otro».
+
+```bash
+pnpm --filter @tax/api exec nest build
+pnpm --filter @tax/api exec tsx src/test/e2e-cli.ts
+```
+
+Ejecuta los comandos de `cli/` **compilados**, como los corre el contenedor.
+No es redundante con probarlos a mano: `tsx` no emite los metadatos de
+decoradores, así que Nest no ve las dependencias de los guardias y los
+instancia vacíos sin protestar. Un comando podía pasar en desarrollo y morir
+en el VPS con «can't resolve dependencies of the SessionGuard». Esta prueba
+corre `node dist/cli/*.js` y falla si aparece ese error.
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-totp.ts
+```
+
+Recorre el segundo factor de la oficina: una cuenta sin él que no puede usar
+el panel, el alta con el QR, el acceso pidiendo el código, el rechazo del
+mismo código dos veces, el código de respaldo y el bloqueo tras cinco
+intentos. Deja la cuenta como estaba, así que se puede repetir.
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-push.ts <clave-de-api>
+```
+
+Comprueba la mitad de Web Push que vive en el servidor: levanta un servicio de
+push falso, registra una suscripción real apuntando ahí y verifica que el
+aviso sale firmado con VAPID, cifrado en `aes128gcm`, con TTL 60 y urgencia
+alta, que las cabeceras en claro no llevan teléfono ni dirección, y que un
+`410 Gone` borra la suscripción.
+
+El falso tiene que hablar HTTPS, porque `web-push` llama siempre a
+`https.request` sin mirar el protocolo del endpoint. Hace falta un certificado
+autofirmado y que la API confíe en él:
+
+```bash
+cd apps/api && mkdir -p .certs
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650   -keyout .certs/localhost.key -out .certs/localhost.crt   -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+NODE_EXTRA_CA_CERTS=.certs/localhost.crt node -r dotenv/config dist/main.js
+```
+
+`NODE_EXTRA_CA_CERTS` añade esa autoridad a las de siempre en vez de apagar la
+verificación con `NODE_TLS_REJECT_UNAUTHORIZED`: lo que se prueba sigue siendo
+el camino real, con TLS verificado. El directorio `.certs/` está ignorado y es
+solo de desarrollo.
+
+## Segundo factor de la oficina (§8.1)
+
+TOTP de seis dígitos cada 30 segundos, RFC 6238, lo que leen Google
+Authenticator, Aegis o 1Password. El teléfono no necesita señal para generar
+el código: solo el secreto compartido y el reloj.
+
+Está escrito a mano en `src/common/totp.ts` en vez de traer una dependencia,
+porque son treinta líneas que los RFC especifican al detalle **y** publican
+sus vectores de prueba: `src/test/totp.spec.ts` comprueba los diez de RFC 4226
+y los seis de RFC 6238. Una dependencia aquí sería más superficie y menos
+certeza.
+
+Cuatro cosas que no son obvias y sin las cuales esto sería decorativo:
+
+- **El secreto va cifrado en la base** (AES-256-GCM con `ENCRYPTION_KEY`).
+  En claro, quien lea la tabla genera códigos válidos para siempre.
+- **Cada código vale una sola vez.** Dentro de sus 30 segundos un TOTP es
+  correcto muchas veces, así que `totp_last_counter` guarda el último
+  intervalo aceptado. Sin eso, verlo por encima del hombro basta.
+- **El servidor cierra la puerta, no la interfaz.** Una sesión cuya cuenta no
+  tiene el segundo factor activo recibe `TOTP_SETUP_REQUIRED` en todo salvo
+  `/v1/auth/me`, el alta y la salida. Si fuera solo un aviso del panel, quien
+  tuviera la contraseña se saltaría el panel.
+- **Hay códigos de respaldo.** Diez, de un solo uso, con Argon2 como las
+  contraseñas. Una oficina a las tres de la mañana con el celular roto no
+  puede quedarse fuera hasta que alguien aparezca.
+
+Queda una grieta conocida: quien tenga la contraseña de una cuenta recién
+creada puede darse de alta él mismo el segundo factor antes que su dueño. Por
+eso el alta se fuerza en el primer acceso, cuando la cuenta se acaba de crear
+y nadie más la conoce. Cerrarla del todo pide un código de invitación de un
+solo uso al crear la cuenta, que es trabajo para cuando exista la gestión de
+usuarios desde el panel.
+
+Lo que TOTP **no** resuelve: una página falsa que pida el código y lo reenvíe
+al panel real en ese momento. Las llaves de paso (WebAuthn) sí atan el acceso
+al dominio, a cambio de un teléfono moderno por operador y un repuesto si se
+pierde. Para un panel interno de cuatro o cinco personas, TOTP es la decisión
+del documento y es razonable.
+
+## Retención del histórico de GPS (§9.3)
+
+`driver_positions` es la tabla que crece de verdad. Con el turno abierto la
+PWA manda posición cada dos segundos (`POSITION_REPORT_*`), pero **no se
+guarda cada envío**: a la tabla se muestrea cada
+`POSITION_SAMPLE_RIDE_SECONDS` en carrera y cada
+`POSITION_SAMPLE_IDLE_SECONDS` en espera —10 y 30 segundos—, así que 62 taxis
+a 12 horas de carrera son **267.840 filas al día**, y ese es el techo.
+
+La separación es a propósito: el mapa de la oficina va en vivo porque cada
+envío se reparte por el socket en cuanto llega, sin que el histórico crezca
+con él. Guardar los dos segundos serían 1,3 millones de filas al día, quince
+veces las 90.000 que deja un turno en espera.
+
+Medido, cada fila ocupa unos 142 bytes con sus índices, así que con el plazo
+de seis meses del documento la tabla se estabiliza en torno a **6,4 GB** — y
+sin purga, crece sin tope.
+
+Pero el motivo no es el disco, es lo que hay dentro: el recorrido minuto a
+minuto de 62 personas. Pasados unos meses no sirve para operar —el mapa en
+vivo mira Redis, y las excepciones se revisan en días— y sigue siendo un
+riesgo si alguien se lleva un volcado.
+
+El plazo del documento son **6 meses**, marcado ahí mismo como «a confirmar
+con la empresa». Vive en `POSITION_RETENTION_DAYS`, no incrustado en el
+código, porque cambiarlo es una decisión suya.
+
+### Por qué por lotes
+
+Un `DELETE` de ocho millones de filas es una transacción enorme: infla el WAL
+de golpe, mantiene los bloqueos durante minutos y deja a autovacuum detrás.
+Eso es un pico, y a las cuatro de la mañana también puede haber una carrera en
+curso.
+
+`purge_driver_positions(dias, lote)` borra como mucho `lote` filas por llamada
+y devuelve cuántas quitó. El trabajo la llama en bucle con pausas hasta que
+devuelve 0, con un tope por ejecución: si una noche no acaba, sigue a la
+siguiente. Además la función pone `lock_timeout = 2s`, así que si algo tiene
+las filas bloqueadas se rinde en lugar de encolar al resto detrás.
+
+Medido con 300.000 filas de atraso, golpeando `/status` —que consulta de
+verdad `rides` y `outbox_events`— mientras la purga corría:
+
+| | p50 | p95 | peor |
+| --- | --- | --- | --- |
+| API durante la purga | 3,3 ms | **17 ms** | 60,8 ms |
+
+60 lotes, sin una sola petición esperando un bloqueo. Entre ejecuciones el p95
+se ha movido entre 7 y 17 ms y la peor petición entre 12 y 61 ms, según lo que
+estuviera haciendo la máquina; aquí van los peores valores observados. Lo que
+importa es el orden de magnitud: decenas de milisegundos, no segundos.
+
+La referencia «en reposo» que imprime la prueba sale peor que la medida
+durante la purga (p95 de 117 ms) y no sirve para comparar: se toma justo
+después de insertar las filas de prueba, con Postgres todavía digiriendo. Lo
+que se exige es el valor absoluto durante el borrado, no la diferencia.
+`e2e-purga.ts` mide exactamente eso y falla si el p95 pasa de 250 ms o si
+alguna petición supera 1 s.
+
+Dos trampas que esa prueba aprendió a evitar, porque las dos dieron un
+resultado estupendo sin haber medido nada:
+
+- **Medir contra un endpoint que no toca la base.** La primera versión usaba
+  `/v1/zones`, que responde 401 antes de llegar a Postgres: estaba midiendo el
+  guardia de autenticación. Ahora exige un 200 y aborta si no lo recibe.
+- **Medir el limitador de tasa.** Muestreando a 20 peticiones por segundo
+  contra un límite de 240 por minuto, la mitad salían 429. El muestreo va a
+  ritmo bajo y la prueba falla si no junta muestras suficientes.
+- **Dar por propia la bitácora de otro.** Buscaba la última entrada de los
+  diez minutos anteriores, y una purga anterior que siguiera corriendo dejaba
+  la suya: la prueba daba por bueno un borrado que no era el suyo. Ahora
+  anota el `seq` máximo antes de encolar y exige una entrada posterior.
+
+```bash
+pnpm --filter @tax/api exec tsx src/test/e2e-purga.ts 400000
+```
+
+Dos cosas que conviene saber: el espacio **no vuelve al disco**, autovacuum lo
+deja reutilizable para las filas siguientes, que es justo lo que se quiere (la
+tabla llega a un tamaño de equilibrio en vez de crecer); y cada ejecución
+queda en la bitácora con las filas, los lotes y el plazo aplicado, porque
+borrar datos personales por retención tiene que poder demostrarse.
+
+La oficina puede verlo y lanzarlo a mano, solo administradores:
+
+```
+GET  /v1/admin/maintenance/retention        → plazo, total y cuántas caducaron
+POST /v1/admin/maintenance/purge-positions  → 202, encola la misma purga
+```
+
+Las demás filas de la tabla de §9.3 siguen pendientes: fotos del lugar (30
+días, el endpoint aún no existe), conversaciones de Chatwoot (12 meses, sin
+integrar) y carreras, tarifas y auditoría (5 años). Esta última necesitará
+otro mecanismo: la bitácora tiene `DELETE` revocado a propósito.
+
+## Decisiones que se apartan del documento
+
+- **NestJS 12 en vez de 11.** El documento fijó la 11; la 12 es el estable
+  actual y la API de módulos e inyección no cambia en nada de lo que se usa
+  aquí.
+- **zod 4 y sin `zod-to-openapi`.** zod 4 convierte a JSON Schema de forma
+  nativa, que es exactamente lo que necesita OpenAPI 3.1. Una dependencia
+  menos en el camino crítico.
+- **Transición `PENDING → UNASSIGNED` añadida.** La tabla de §5.3 da por
+  supuesto que la oleada 1 siempre encuentra a alguien. Cuando no hay ningún
+  conductor —de madrugada, o en una vereda sin cobertura— la carrera nunca
+  llegaba a Notificada y se quedaba muda en Pendiente. Ahora acaba igualmente
+  en Sin asignar y la oficina se entera. **Conviene confirmarlo con la
+  empresa**, porque cambia la tabla de estados del documento.
+- **`install_id` en los dispositivos.** El documento habla de dispositivos
+  registrados pero no dice cómo se reconoce al mismo celular entre accesos.
+  Sin eso cada acceso creaba una fila nueva en `driver_devices`, y como los
+  avisos de push salen a todos los dispositivos vivos del conductor, uno que
+  vuelve a entrar varias veces recibiría la misma oferta repetida. Ahora la
+  PWA se genera un identificador la primera vez y lo guarda; no autentica
+  nada, para llegar a usarlo hay que haber pasado código y PIN.
+
+## Superficies
+
+Tres clientes con tres mecanismos de acceso distintos (§8.1), y por eso tres
+grupos de rutas:
+
+| Prefijo | Quién | Autentica con |
+| --- | --- | --- |
+| `/v1/rides`, `/v1/quotes`, `/v1/zones` | n8n (el agente) | Clave de API con ámbitos |
+| `/v1/admin/*`, `/v1/reports/*`, `/v1/audit` | Panel de oficina | Cookie de sesión |
+| `/v1/driver/*` | PWA del conductor | Token al portador del dispositivo |
+
+No es duplicación: el agente y el operador pueden hacer cosas distintas sobre
+la misma carrera, y la bitácora tiene que poder distinguir quién fue.
+
+Dentro del panel, cada endpoint que cambia algo pide un permiso con
+`@RequierePermiso('…')`, no un rol. Los permisos se leen del rol en cada
+petición (`resolveSession` cruza `users` con `roles`), así que quitar uno vale
+desde la siguiente sin cerrar sesiones. El catálogo vive en `@tax/shared`
+(`PERMISOS`); agregar uno es agregarlo ahí y marcar el endpoint: el
+administrador lo recibe solo, y los demás roles no lo tienen hasta que alguien
+se lo dé.
+
+## Lo que falta
+
+- **Adaptador de Chatwoot y WAHA** (capa anticorrupción) y el endpoint de
+  fotos con URL firmada.
+- **Exportaciones** a Excel y PDF en segundo plano.
+- **Retención de las demás tablas de §9.3**: fotos, conversaciones y el
+  archivado a cinco años de carreras y bitácora.

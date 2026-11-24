@@ -1,0 +1,456 @@
+import { z } from 'zod';
+import { pointSchema } from './geo';
+
+/**
+ * Estados de la carrera (§5.3 de la arquitectura).
+ * Los códigos coinciden con los valores de la columna `rides.status`
+ * usados por el UPDATE atómico de exclusividad (§5.1).
+ */
+export const RIDE_STATUSES = [
+  'PENDING',
+  'NOTIFIED',
+  'ASSIGNED',
+  'DRIVER_ARRIVED',
+  'IN_PROGRESS',
+  'COMPLETED',
+  'CANCELLED',
+  'UNASSIGNED',
+] as const;
+
+export type RideStatus = (typeof RIDE_STATUSES)[number];
+
+/** Estados en los que el conductor tiene la carrera tomada (índice único parcial, §5.1). */
+export const ACTIVE_RIDE_STATUSES: RideStatus[] = ['ASSIGNED', 'DRIVER_ARRIVED', 'IN_PROGRESS'];
+
+/**
+ * Estados en los que la carrera sigue ocupando al cliente: desde que la pide
+ * hasta que termina o se cancela, «sin asignar» incluido.
+ *
+ * Tiene que decir lo mismo que el índice parcial
+ * `one_active_ride_per_customer` de la tabla. Si se separan, lo que cuenta el
+ * tope y lo que la base permite dejan de coincidir, y el desacuerdo sale como
+ * un error que nadie entiende.
+ */
+export const OPEN_RIDE_STATUSES: RideStatus[] = [
+  'PENDING',
+  'NOTIFIED',
+  'ASSIGNED',
+  'DRIVER_ARRIVED',
+  'IN_PROGRESS',
+  'UNASSIGNED',
+];
+
+/**
+ * Cuántos taxis puede tener a la vez un mismo teléfono.
+ *
+ * Lo cuenta la API, no el prompt del agente: un tope que vive solo en una
+ * instrucción de texto no es un tope.
+ */
+export const MAX_CARRERAS_ACTIVAS = 5;
+
+/** Estados terminales: ya no admiten transiciones. */
+export const TERMINAL_RIDE_STATUSES: RideStatus[] = ['COMPLETED', 'CANCELLED'];
+
+export type TransitionActor = 'system' | 'driver' | 'operator' | 'customer';
+
+export interface RideTransition {
+  from: RideStatus;
+  to: RideStatus;
+  /** Quién puede ejecutarla. */
+  by: TransitionActor[];
+  /** Condición de negocio, tal como la fija §5.3. */
+  condition: string;
+}
+
+/**
+ * Tabla de transiciones explícita (§5.3). Es la única fuente de verdad:
+ * ninguna pantalla ofrece una acción que no esté aquí.
+ */
+export const RIDE_TRANSITIONS: RideTransition[] = [
+  {
+    from: 'PENDING',
+    to: 'NOTIFIED',
+    by: ['system'],
+    condition: 'Hay al menos un candidato en la oleada',
+  },
+  {
+    from: 'NOTIFIED',
+    to: 'ASSIGNED',
+    by: ['driver'],
+    condition: 'UPDATE atómico exitoso',
+  },
+  {
+    from: 'NOTIFIED',
+    to: 'UNASSIGNED',
+    by: ['system'],
+    condition: 'Tres oleadas vencidas',
+  },
+  {
+    /**
+     * Añadida sobre la tabla de §5.3, que da por supuesto que la oleada 1
+     * siempre encuentra a alguien. Cuando no hay ningún conductor disponible
+     * —de madrugada, o en una vereda sin cobertura— la carrera nunca llega a
+     * Notificada y se quedaría en Pendiente sin que nadie se entere. Tiene
+     * que acabar igualmente en Sin asignar: la oficina se entera en segundos.
+     */
+    from: 'PENDING',
+    to: 'UNASSIGNED',
+    by: ['system'],
+    condition: 'Ninguna oleada encontró candidatos',
+  },
+  {
+    from: 'UNASSIGNED',
+    to: 'NOTIFIED',
+    // El sistema la relanza solo una vez agotadas las oleadas (19/11/2026).
+    by: ['operator', 'system'],
+    condition: 'Relanzar despacho (la oficina o el relanzamiento automático)',
+  },
+  {
+    from: 'UNASSIGNED',
+    to: 'ASSIGNED',
+    by: ['operator'],
+    condition: 'Asignación manual',
+  },
+  {
+    from: 'ASSIGNED',
+    to: 'NOTIFIED',
+    // El sistema, cuando el conductor cancela por fuerza mayor (21/11/2026):
+    // la carrera vuelve a buscar taxi en vez de cerrarse.
+    by: ['operator', 'system'],
+    condition: 'Reasignación (RF-41): el conductor original queda liberado',
+  },
+  {
+    /**
+     * Añadida el 21/11/2026: el conductor llegó al punto y tuvo una causa
+     * mayor (se varó, una emergencia). El cliente sigue esperando, así que se
+     * le busca otro taxi igual que desde «Asignada».
+     */
+    from: 'DRIVER_ARRIVED',
+    to: 'NOTIFIED',
+    by: ['system'],
+    condition: 'El conductor canceló por fuerza mayor: se busca otro taxi',
+  },
+  {
+    from: 'ASSIGNED',
+    to: 'DRIVER_ARRIVED',
+    by: ['driver'],
+    condition: 'A menos de 150 m del punto; si no, se registra la excepción',
+  },
+  {
+    from: 'DRIVER_ARRIVED',
+    to: 'IN_PROGRESS',
+    by: ['driver'],
+    condition: 'Pasajero a bordo',
+  },
+  {
+    from: 'IN_PROGRESS',
+    to: 'COMPLETED',
+    by: ['driver'],
+    condition: 'El conductor vuelve a Disponible',
+  },
+  {
+    from: 'PENDING',
+    to: 'CANCELLED',
+    by: ['customer', 'operator', 'driver'],
+    condition: 'Motivo obligatorio',
+  },
+  {
+    from: 'NOTIFIED',
+    to: 'CANCELLED',
+    by: ['customer', 'operator', 'driver'],
+    condition: 'Motivo obligatorio',
+  },
+  {
+    from: 'UNASSIGNED',
+    to: 'CANCELLED',
+    // El sistema la cierra cuando ni el relanzamiento consigue conductor, o
+    // cuando se queda sin asignar demasiado tiempo (19/11/2026): así el
+    // cliente nunca queda bloqueado con una carrera muerta.
+    by: ['customer', 'operator', 'system'],
+    condition: 'Motivo obligatorio; el sistema la cierra sin conductor o por inactividad',
+  },
+  {
+    from: 'ASSIGNED',
+    to: 'CANCELLED',
+    by: ['customer', 'operator', 'driver'],
+    condition: 'Motivo obligatorio',
+  },
+  {
+    from: 'DRIVER_ARRIVED',
+    to: 'CANCELLED',
+    by: ['customer', 'operator', 'driver'],
+    condition: 'Motivo obligatorio',
+  },
+];
+
+export function transitionsFrom(status: RideStatus, actor?: TransitionActor): RideTransition[] {
+  return RIDE_TRANSITIONS.filter(
+    (t) => t.from === status && (!actor || t.by.includes(actor)),
+  );
+}
+
+export function canTransition(from: RideStatus, to: RideStatus, actor?: TransitionActor): boolean {
+  return transitionsFrom(from, actor).some((t) => t.to === to);
+}
+
+/** Orden de progreso para animar avances y retrocesos del ciclo de vida. */
+export const RIDE_PROGRESS_ORDER: RideStatus[] = [
+  'PENDING',
+  'NOTIFIED',
+  'ASSIGNED',
+  'DRIVER_ARRIVED',
+  'IN_PROGRESS',
+  'COMPLETED',
+];
+
+export function rideProgressIndex(status: RideStatus): number {
+  const i = RIDE_PROGRESS_ORDER.indexOf(status);
+  return i === -1 ? RIDE_PROGRESS_ORDER.length : i;
+}
+
+export const VEHICLE_TYPES = ['sedan', 'hatchback', 'camioneta', 'van'] as const;
+export type VehicleType = (typeof VEHICLE_TYPES)[number];
+
+/**
+ * Qué vehículos pueden atender un pedido de cada tipo (19/11/2026).
+ *
+ * Sedán y hatchback son el taxi de siempre, de 4 puestos: al cliente le da
+ * igual cuál llegue, y el agente pide «sedan» para todo servicio normal. Si
+ * el despacho buscara el tipo exacto, los hatchback nunca recibirían
+ * carreras. Camioneta y van siguen siendo pedidos aparte (grupos, carga).
+ */
+export const VEHICULOS_QUE_ATIENDEN: Record<VehicleType, readonly VehicleType[]> = {
+  sedan: ['sedan', 'hatchback'],
+  hatchback: ['hatchback', 'sedan'],
+  camioneta: ['camioneta'],
+  van: ['van'],
+};
+
+export const rideAddressSchema = z.object({
+  text: z.string().min(3, 'Escribe al menos 3 caracteres'),
+  reference: z.string().optional(),
+  point: pointSchema.optional(),
+  placeId: z.string().optional(),
+  /**
+   * El enlace de ubicación tal como lo mandó el cliente por WhatsApp. El
+   * botón «Ir con Maps» del conductor abre este mismo enlace, y si no viene
+   * `point`, el punto se lee de él. Solo cuenta si es de un servicio de mapas
+   * (`enlaceDeMapaValido`); otro cualquiera se ignora.
+   */
+  link: z.string().max(2000).optional(),
+});
+export type RideAddress = z.infer<typeof rideAddressSchema>;
+
+export const createRideSchema = z.object({
+  customerPhone: z
+    .string()
+    .regex(/^\+\d{8,15}$/, 'Teléfono en formato E.164, por ejemplo +573001234567'),
+  customerName: z.string().min(2).optional(),
+  /**
+   * El nombre de WhatsApp no sirve («Dd», «.», un número) y el agente tenía
+   * que preguntarlo (21/11/2026). Con esto en true, una carrera sin un nombre
+   * claro se rechaza con `MISSING_CUSTOMER_NAME` en vez de crearse a nombre
+   * de nadie. Lo pone n8n; sin el campo, el nombre sigue siendo opcional.
+   */
+  nombreObligatorio: z.boolean().optional(),
+  pickup: rideAddressSchema,
+  dropoff: rideAddressSchema.optional(),
+  vehicleType: z.enum(VEHICLE_TYPES).default('sedan'),
+  passengers: z.number().int().min(1).max(8).default(1),
+  /**
+   * Cuál de los taxis del pedido es este: 1 el primero, del 2 al 5 los demás.
+   *
+   * Es lo que separa «necesito tres taxis, somos siete» de «taxi» escrito
+   * tres veces por impaciencia, y las dos cosas tienen que convivir.
+   *
+   * El taxi 1 no se marca, así que choca contra el índice de una carrera
+   * activa por teléfono y un pedido repetido rebota con `RIDE_ALREADY_ACTIVE`.
+   * Del 2 en adelante la carrera se marca como concurrente y convive con las
+   * demás del pedido. El tope duro sigue siendo `MAX_CARRERAS_ACTIVAS`.
+   */
+  numeroEnPedido: z.coerce.number().int().min(1).max(MAX_CARRERAS_ACTIVAS).default(1),
+  /**
+   * Cuántos taxis van a ESTE punto (11/11/2026).
+   *
+   * «Necesito 5 taxis en la terminal» se pide con una sola llamada y
+   * `cantidad: 5`: la API crea las cinco carreras en la misma transacción, o
+   * ninguna si no caben en el cupo (`MAX_ACTIVE_RIDES`, con el cupo que
+   * queda). Se numeran desde `numeroEnPedido`, así que «dos en la terminal y
+   * uno en el hotel» son dos llamadas: `cantidad: 2, numeroEnPedido: 1` y
+   * `cantidad: 1, numeroEnPedido: 3`. Con una, la respuesta es la carrera de
+   * siempre; con más, la primera carrera más `rides` con todas.
+   */
+  cantidad: z.coerce.number().int().min(1).max(MAX_CARRERAS_ACTIVAS).default(1),
+  /**
+   * El cliente va a pagar con pago electrónico (Nequi, transferencia,
+   * datáfono). La carrera solo se les ofrece a conductores que lo aceptan;
+   * si en las oleadas no aparece ninguno, queda «sin asignar» como cualquier
+   * otra, sin abrirse a los demás. Sin el campo, efectivo.
+   */
+  pagoElectronico: z.boolean().default(false),
+  /**
+   * La línea de WhatsApp por la que escribió el cliente (20/11/2026). Vale
+   * cualquiera de las tres formas que n8n puede tener a mano: el nombre de
+   * la sesión de WAHA, el número de la línea (con o sin +57) o su nombre en
+   * el panel. La API la traduce a la línea registrada; sin ella, la carrera
+   * queda «Sin línea» en Reportes.
+   */
+  line: z.string().trim().min(1).max(60).optional(),
+  notes: z.string().max(280).optional(),
+  /**
+   * Enlace a la foto del lugar que mandó el cliente (el `data_url` del
+   * adjunto en Chatwoot). La API la descarga después de crear la carrera; si
+   * falla, la carrera sigue adelante sin foto. También se puede mandar luego,
+   * con `POST /v1/rides/:id/photo`.
+   */
+  pickupPhotoUrl: z.string().url().max(2000).optional(),
+  /**
+   * La autorización de tratamiento de datos que dio el cliente (Ley 1581,
+   * art. 9; 17/11/2026): la versión de la política que se le informó y el
+   * canal. n8n la manda con cada pedido; la API la guarda en el cliente si
+   * es la primera vez o cambió la versión, con la hora del servidor.
+   */
+  consent: z
+    .object({
+      version: z.string().trim().min(1).max(40),
+      channel: z.string().trim().min(1).max(60),
+    })
+    .optional(),
+}).refine((pedido) => pedido.numeroEnPedido + pedido.cantidad - 1 <= MAX_CARRERAS_ACTIVAS, {
+  path: ['cantidad'],
+  message: `Un pedido llega hasta el taxi ${MAX_CARRERAS_ACTIVAS}: numeroEnPedido + cantidad - 1 no puede pasar de ${MAX_CARRERAS_ACTIVAS}`,
+});
+export type CreateRideInput = z.infer<typeof createRideSchema>;
+
+export interface RideStatusEntry {
+  from: RideStatus | null;
+  to: RideStatus;
+  actor: TransitionActor;
+  actorName: string;
+  at: string;
+  note?: string;
+}
+
+/**
+ * Las tres oleadas por radio, y una cuarta ronda que avisa a todos los
+ * disponibles sin mirar distancia. La cuarta existe para probar los avisos
+ * con pocos conductores y se apaga con `OLEADA_FINAL_A_TODOS=false`.
+ */
+export type Oleada = 1 | 2 | 3 | 4;
+export const OLEADA_A_TODOS = 4 as const;
+
+/**
+ * Lo que hizo cada oleada, también las que no encontraron a nadie.
+ *
+ * Las ofertas solo cuentan las oleadas que tuvieron candidatos. Una que miró
+ * en 1,5 km, no halló a nadie y escaló al instante no dejaba ningún rastro,
+ * y desde el panel parecía que la carrera había saltado directamente a la
+ * oleada 2 sin razón.
+ */
+export interface WaveLogEntry {
+  wave: Oleada;
+  /**
+   * El lanzamiento al que pertenece: 1 al crear la carrera, y uno más por
+   * cada «Relanzar». Ausente en las entradas anteriores a que existiera;
+   * ahí cada oleada 1 marca el comienzo de un intento.
+   */
+  intento?: number;
+  startedAt: string;
+  /** Cuándo vence. Nulo si no encontró a nadie y escaló en el acto. */
+  expiresAt: string | null;
+  /** Radio de búsqueda. Nulo en la ronda a todos, que no mira distancia. */
+  radiusKm: number | null;
+  /** Conductores nuevos de esta oleada. */
+  candidates: number;
+  /**
+   * Los de oleadas anteriores que no contestaron y siguen con la oferta: las
+   * oleadas suman, no reemplazan. Ausente en las entradas anteriores a eso.
+   */
+  arrastrados?: number;
+  /**
+   * Solo en la ronda a todos: conductores disponibles que no recibieron la
+   * oferta porque nunca mandaron su posición. Sin esto el panel diría
+   * «nadie disponible» con un conductor en turno, y parece un fallo.
+   */
+  sinGps?: number;
+}
+
+export interface RideOffer {
+  driverId: string;
+  driverName: string;
+  wave: Oleada;
+  /** El lanzamiento al que pertenece. Ver `WaveLogEntry.intento`. */
+  intento: number;
+  sentAt: string;
+  expiresAt: string;
+  etaMinutes: number;
+  distanceKm: number;
+  response: 'pending' | 'accepted' | 'rejected' | 'expired' | 'revoked';
+  /**
+   * Qué pasó con el aviso al teléfono (21/11/2026): 'enviado', 'reenviado',
+   * 'sin_dispositivo', 'fallido' o 'apagado'. Nulo en ofertas anteriores.
+   */
+  aviso?: string | null;
+  /** Cuando el teléfono confirmó que le llegó. La única prueba de entrega. */
+  recibidaAt?: string | null;
+}
+
+export interface Ride {
+  id: string;
+  /** Código legible R-2026-004812 (§6). */
+  code: string;
+  status: RideStatus;
+  /** Columna `version`: bloqueo optimista y orden de eventos hacia n8n (§7.1). */
+  version: number;
+  createdAt: string;
+  customerPhone: string;
+  customerName: string;
+  customerId?: string;
+  /** Teléfono del equipo de pruebas: Reportes puede dejar fuera sus carreras. */
+  customerEsPrueba?: boolean;
+  pickup: RideAddress;
+  dropoff?: RideAddress;
+  zoneId: string;
+  vehicleType: VehicleType;
+  passengers: number;
+  /** Paga con pago electrónico; ausente o falso, en efectivo. */
+  pagoElectronico?: boolean;
+  /**
+   * Lo que se recorrió, una vez conocido el destino. Ausente mientras la
+   * carrera no ha terminado, y también después si el conductor cerró sin GPS.
+   */
+  distanceKm?: number;
+  /** Quién puso el destino: el cliente al pedirla, o el conductor al cerrar. */
+  dropoffSource?: 'cliente' | 'conductor';
+  /** Cuándo llegó la foto del lugar que mandó el cliente; ausente si no hay. */
+  pickupPhotoAt?: string;
+  /** El enlace de ubicación que mandó el cliente, si compartió ubicación. */
+  pickupLink?: string;
+  /**
+   * De dónde salió el punto de recogida: la ubicación del cliente, un lugar
+   * del catálogo, el geocodificador, o ninguno (`sin_ubicar`: el punto es el
+   * de partida del pueblo, no el del cliente).
+   */
+  pickupSource?: 'compartida' | 'catalogo' | 'geocodificada' | 'sin_ubicar';
+  driverId?: string;
+  line: string;
+  chatwootConversationId?: number;
+  etaMinutes?: number;
+  notes?: string;
+  history: RideStatusEntry[];
+  offers: RideOffer[];
+  /** Oleada de despacho en curso (§5.2). */
+  wave?: Oleada;
+  /** El recorrido completo de las oleadas, para seguirlo desde el panel. */
+  waveLog?: WaveLogEntry[];
+  cancelReason?: string;
+  /** Quién la canceló. Ausente si no está cancelada. */
+  cancelledBy?: TransitionActor;
+  /** Si la canceló el conductor, la clave del motivo que eligió. */
+  cancelCode?: string;
+}
+
+/** Código legible de carrera: R-AAAA-NNNNNN. */
+export function formatRideCode(year: number, sequence: number): string {
+  return `R-${year}-${String(sequence).padStart(6, '0')}`;
+}

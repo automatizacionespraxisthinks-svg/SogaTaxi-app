@@ -1,0 +1,253 @@
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import type { FastifyRequest } from 'fastify';
+import { z } from 'zod';
+import { RIDE_STATUSES, createRideSchema, pointSchema, type RideStatus } from '@tax/shared';
+import { zodBody } from '../../common/zod.pipe';
+import { AppError } from '../../common/problem';
+import { HuellaDeIdempotencia, IdempotencyInterceptor } from '../../common/idempotency.interceptor';
+import { ApiKeyGuard, Scopes } from '../identity/api-key.guard';
+import { RidesService, type Actor } from './rides.service';
+import { DispatchService } from '../dispatch/dispatch.service';
+import { RealtimeGateway } from '../../realtime/realtime.gateway';
+import { FotosService } from './fotos.service';
+
+/*
+ * También acepta el cuerpo envuelto en `pickup`, como lo mandaba la
+ * herramienta `actualizar_direccion` del flujo de n8n: sin esto, cada
+ * corrección del punto respondía VALIDATION_FAILED y el agente le decía al
+ * cliente que no se pudo.
+ */
+const addressSchema = z.preprocess(
+  (v) => (v && typeof v === 'object' && 'pickup' in v && !('text' in v) ? (v as { pickup: unknown }).pickup : v),
+  z.object({
+    text: z.string().min(3),
+    reference: z.string().optional(),
+    point: pointSchema.optional(),
+    /** El enlace de ubicación que mandó el cliente; ver `rideAddressSchema.link`. */
+    link: z.string().max(2000).optional(),
+  }),
+);
+
+const cancelSchema = z.object({
+  reason: z.string().min(3, 'El motivo es obligatorio'),
+});
+
+const pagoSchema = z.object({ pagoElectronico: z.boolean(), relanzar: z.boolean().optional() });
+
+/**
+ * Lo que identifica un pedido de taxi: quién lo pide y, si compartió su
+ * ubicación, dónde está.
+ *
+ * El resto del cuerpo lo redacta el agente de IA de n8n (`$fromAI`): la
+ * dirección dicha con palabras, la referencia, las notas. Si el agente vuelve
+ * a llamar dentro del mismo turno —su prompt se lo pide ante cualquier error—
+ * esas palabras pueden salir distintas, y comparar el cuerpo entero daba un
+ * 409 por un pedido que era el mismo: el agente le decía al cliente que hubo
+ * un inconveniente mientras el taxi ya iba en camino. La clave ya dice de qué
+ * turno es; la huella solo confirma que no se reutilizó para otro cliente u
+ * otro punto.
+ */
+const huellaDePedido = (cuerpo: unknown) => {
+  const pedido = (cuerpo ?? {}) as {
+    customerPhone?: unknown;
+    cantidad?: unknown;
+    pickup?: { point?: { lat?: unknown; lng?: unknown } };
+  };
+  const punto = pedido.pickup?.point;
+  const redondear = (n: unknown) => (typeof n === 'number' ? Math.round(n * 1e5) / 1e5 : null);
+  // La cantidad entra solo si es más de uno: así las huellas de los pedidos
+  // de un taxi no cambian, y la misma clave con otra cantidad es otro pedido.
+  const cantidad = Number(pedido.cantidad ?? 1);
+  return {
+    telefono: pedido.customerPhone ?? null,
+    punto: punto ? [redondear(punto.lat), redondear(punto.lng)] : null,
+    ...(Number.isFinite(cantidad) && cantidad > 1 ? { cantidad } : {}),
+  };
+};
+
+const listQuerySchema = z.object({
+  status: z
+    .string()
+    .optional()
+    .transform((value) => value?.split(',').filter((s): s is RideStatus => RIDE_STATUSES.includes(s as RideStatus))),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
+
+/**
+ * Contrato con n8n (§7).
+ *
+ * Son las herramientas cerradas del agente: crear, consultar, editar
+ * dirección y cancelar. No hay acceso a SQL, ni a otros clientes, ni a la API
+ * administrativa; los permisos se comprueban aquí, del lado de la API, no en
+ * el prompt (§7.2).
+ */
+@Controller('v1/rides')
+@UseGuards(ApiKeyGuard)
+export class RidesController {
+  constructor(
+    private readonly rides: RidesService,
+    private readonly dispatch: DispatchService,
+    private readonly fotos: FotosService,
+    private readonly realtime: RealtimeGateway,
+  ) {}
+
+  @Post()
+  @Scopes('rides:write')
+  @UseInterceptors(IdempotencyInterceptor)
+  @HuellaDeIdempotencia(huellaDePedido)
+  create(
+    @Req() request: FastifyRequest,
+    @Body(zodBody(createRideSchema)) body: z.infer<typeof createRideSchema>,
+  ) {
+    return this.rides.create(body, actorFrom(request, 'customer'));
+  }
+
+  /*
+   * El listado de todas las carreras, con teléfono y nombre de cada cliente,
+   * pide un ámbito propio (17/11/2026). Con `rides:read`, la clave de n8n
+   * podía listar hasta 500 carreras de todos los clientes, y el agente solo
+   * necesita consultar las suyas por id. Lo usan las pruebas de extremo a
+   * extremo; la clave del seed lo trae, la de n8n en producción no.
+   */
+  @Get()
+  // Solo este: `Scopes` pide cualquiera de los que se le pasen, no todos.
+  @Scopes('rides:list')
+  list(@Query(zodBody(listQuerySchema)) query: z.infer<typeof listQuerySchema>) {
+    return this.rides.list(query.status, query.limit);
+  }
+
+  @Get(':rideId')
+  @Scopes('rides:read')
+  detail(@Param('rideId', ParseUUIDPipe) rideId: string) {
+    return this.rides.detail(rideId);
+  }
+
+  /** RF-11: el cliente corrige la dirección sin perder la carrera. */
+  @Patch(':rideId/address')
+  @Scopes('rides:write')
+  @UseInterceptors(IdempotencyInterceptor)
+  updateAddress(
+    @Req() request: FastifyRequest,
+    @Param('rideId', ParseUUIDPipe) rideId: string,
+    @Body(zodBody(addressSchema)) body: z.infer<typeof addressSchema>,
+  ) {
+    return this.rides.updateAddress(rideId, body, actorFrom(request, 'customer'));
+  }
+
+  /**
+   * El cliente cambia cómo va a pagar. Solo con la carrera sin asignar: es
+   * la salida cuando nadie con pago electrónico la tomó y el cliente acepta
+   * pagar en efectivo.
+   *
+   * Con `relanzar: true` además vuelve a buscar taxi, en la misma llamada:
+   * así el agente de n8n lo resuelve con una sola herramienta y no puede
+   * quedarse a medias (cambiada pero sin relanzar).
+   */
+  @Patch(':rideId/payment')
+  @Scopes('rides:write')
+  async cambiarMedioDePago(
+    @Req() request: FastifyRequest,
+    @Param('rideId', ParseUUIDPipe) rideId: string,
+    @Body(zodBody(pagoSchema)) body: z.infer<typeof pagoSchema>,
+  ) {
+    const ride = await this.rides.cambiarMedioDePago(rideId, body.pagoElectronico, actorFrom(request, 'customer'));
+    if (!body.relanzar) return ride;
+    // Relanzar es un acto de operador (§5.3), como en `/redispatch`.
+    await this.dispatch.redispatch(rideId, actorFrom(request, 'operator'));
+    return { ...(await this.rides.byId(rideId)), relanzada: true };
+  }
+
+  @Post(':rideId/cancel')
+  @Scopes('rides:write')
+  @UseInterceptors(IdempotencyInterceptor)
+  cancel(
+    @Req() request: FastifyRequest,
+    @Param('rideId', ParseUUIDPipe) rideId: string,
+    @Body(zodBody(cancelSchema)) body: z.infer<typeof cancelSchema>,
+  ) {
+    return this.rides.cancel(rideId, body.reason, actorFrom(request, 'customer'));
+  }
+
+  /** Relanzar el despacho de una carrera sin asignar (§5.3, operador). */
+  @Post(':rideId/redispatch')
+  @Scopes('rides:write')
+  async redispatch(@Req() request: FastifyRequest, @Param('rideId', ParseUUIDPipe) rideId: string) {
+    // Relanzar es un acto de operador (§5.3); por esta via lo hace una
+    // integracion en su nombre, y la bitacora dira cual.
+    await this.dispatch.redispatch(rideId, actorFrom(request, 'operator'));
+    return { ok: true };
+  }
+
+  /**
+   * La foto del lugar, para cuando el cliente la manda después de pedir el
+   * taxi. Dos formas, según lo que tenga n8n a mano:
+   *
+   * - el archivo tal cual, con `content-type: image/jpeg` (o png, webp) y la
+   *   imagen como cuerpo: es «n8n Binary File» en el nodo HTTP Request;
+   * - `{ "url": "…" }` en JSON, y la API la descarga.
+   *
+   * Hasta 5 MB. Si ya había una, la reemplaza. El conductor la ve al momento.
+   */
+  @Post(':rideId/photo')
+  @Scopes('rides:write')
+  async photo(@Req() request: FastifyRequest, @Param('rideId', ParseUUIDPipe) rideId: string) {
+    const actor = actorFrom(request, 'customer');
+    const cuerpo: unknown = request.body;
+
+    const ride = Buffer.isBuffer(cuerpo)
+      ? await this.fotos.guardar(rideId, cuerpo, 'archivo', actor)
+      : await this.fotos.desdeEnlace(rideId, enlaceDeFoto(cuerpo), actor);
+
+    this.realtime.rideChanged(ride);
+    return { ok: true, code: ride.code, pickupPhotoAt: ride.pickupPhotoAt };
+  }
+
+  /** Asignación manual (RF-41). */
+  @Post(':rideId/assign')
+  @Scopes('rides:write')
+  assign(
+    @Req() request: FastifyRequest,
+    @Param('rideId', ParseUUIDPipe) rideId: string,
+    @Body(zodBody(z.object({ driverId: z.string().uuid() })))
+    body: { driverId: string },
+  ) {
+    return this.dispatch.assignManually(rideId, body.driverId, actorFrom(request, 'operator'));
+  }
+}
+
+/** El enlace del cuerpo, o 400: con `parse` a secas, un cuerpo malo era un 500. */
+function enlaceDeFoto(cuerpo: unknown): string {
+  const leido = fotoSchema.safeParse(cuerpo);
+  if (!leido.success) {
+    throw new AppError('VALIDATION_FAILED', 'Manda la imagen como cuerpo (image/jpeg) o un JSON con { "url": "…" }');
+  }
+  return leido.data.url;
+}
+
+const fotoSchema = z.object({ url: z.string().url().max(2000) }, {
+  error: 'Manda la imagen como cuerpo (image/jpeg) o un JSON con { "url": "…" }',
+});
+
+function actorFrom(request: FastifyRequest, kind: Actor['kind']): Actor {
+  const principal = request.principal;
+  if (!principal) throw new AppError('UNAUTHORIZED', 'Sin principal en la petición');
+  return {
+    kind,
+    name: principal.name,
+    id: principal.id,
+    role: 'integración',
+    ip: request.ip,
+  };
+}

@@ -1,0 +1,867 @@
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { MotionConfig, motion } from 'motion/react';
+import { Wifi, WifiOff } from 'lucide-react';
+import type { Oleada, Point } from '@tax/shared';
+import { haversineKm } from '@tax/shared';
+import { cn, screenTransition } from '@tax/ui';
+import { TopStatus } from './components/Chrome';
+import { Acceso } from './screens/Acceso';
+import { Turno } from './screens/Turno';
+import { Oferta } from './screens/Oferta';
+import { Carrera } from './screens/Carrera';
+import { Resumen } from './screens/Resumen';
+import { ApiError, api, confirmarAviso, installId, storeToken, storedToken } from './api/client';
+import { connectDriverSocket, type OfferPush } from './api/socket';
+import { clearQueueOf, flush, onQueueChange, onQueueRejected, pendingCount, send, setQueueOwner, watchConnection } from './api/queue';
+import {
+  CADENCIA_POR_DEFECTO,
+  watchPosition,
+  type PositionIntervals,
+  type PositionWatcher,
+} from './api/position';
+import { disablePush, enablePush, pushSupport, type PushState } from './api/push';
+import { vigilarActualizaciones } from './api/actualizacion';
+import { prepararSonido } from './api/sonido';
+import {
+  borrarUltimoEstado,
+  estadoInicial,
+  guardarUltimoEstado,
+  offerFromRide,
+  offerFromSocket,
+  sessionReducer,
+  type ApiRide,
+  type Phase,
+} from './state/session';
+
+/** Cómo se llama cada etapa para el conductor, para avisarle si una no se registró. */
+const NOMBRE_DE_ETAPA: Record<string, string> = {
+  arrived: 'Llegué',
+  board: 'Pasajero a bordo',
+  finish: 'Finalizar',
+};
+
+/** Orden de avance: decide si la pantalla entra por la derecha o por la izquierda. */
+const ORDER: Record<Phase, number> = {
+  login: 0,
+  off_shift: 1,
+  available: 2,
+  paused: 2,
+  offer: 3,
+  ride: 4,
+  summary: 5,
+};
+
+interface DriverSessionResponse {
+  driver: { id: string; code: string; name: string };
+  /** Turno abierto, si lo hay: decide si la PWA arranca en espera o fuera. */
+  shift: { shiftId: string; plate: string; startedAt: string; paused: boolean } | null;
+  totals: { rides: number };
+  rules?: {
+    minRideMinutes: number;
+    /** Radio de «Llegué», en metros. */
+    arrivalRadiusMeters?: number;
+    /** Cada cuánto mandar la posición, en segundos, en carrera y en espera. */
+    positionSeconds?: { ride: number; idle: number };
+  };
+  activeRide: ApiRide | null;
+  pendingOffer: {
+    rideId: string;
+    wave: number;
+    distanceKm: number;
+    etaMinutes: number;
+    expiresAt: string;
+    ride: ApiRide;
+  } | null;
+}
+
+export function App() {
+  // Arranca con lo último que se supo: sin señal, el conductor ve su
+  // carrera o su turno, no la pantalla de acceso.
+  const [session, dispatch] = useReducer(sessionReducer, undefined, estadoInicial);
+  const [notice, setNotice] = useState<string>();
+  const [push, setPush] = useState<PushState>(() => pushSupport());
+  /**
+   * Quién tiene la sesión y en qué carro, según la API. Con un celular que
+   * comparten dos conductores, la pantalla tiene que decir de quién es el
+   * turno (17/11/2026).
+   */
+  const [conductor, setConductor] = useState<{ code: string; name: string }>();
+  const [placaDelTurno, setPlacaDelTurno] = useState<string>();
+  const previousPhase = useRef<Phase>(session.phase);
+  const positionWatcher = useRef<PositionWatcher>(undefined);
+  /**
+   * Cada cuánto manda la posición, según la API. En una referencia y no en el
+   * estado porque solo la lee el vigilante del GPS: meterla en el reducer
+   * volvería a pintar la pantalla cada vez que `/me` la confirma, sin que
+   * nada de lo que se ve haya cambiado.
+   */
+  const cadencia = useRef<PositionIntervals>(CADENCIA_POR_DEFECTO);
+  /**
+   * El punto del cliente mientras el conductor va a recogerlo. Con él se mide
+   * la distancia en cada lectura del GPS: el aviso de «a 300 m del punto» y
+   * el «Llegué» habilitado bajo 150 m dependen de ella.
+   */
+  const puntoDeRecogida = useRef<Point | undefined>(undefined);
+
+  const direction: 1 | -1 = ORDER[session.phase] >= ORDER[previousPhase.current] ? 1 : -1;
+  useEffect(() => {
+    previousPhase.current = session.phase;
+  }, [session.phase]);
+
+  /* --- estado al abrir: el socket solo trae lo que pase de ahora en adelante */
+  const restore = useCallback(async () => {
+    if (!storedToken()) return;
+
+    try {
+      const me = await api.get<DriverSessionResponse>('/v1/driver/rides/me');
+      const shiftStartedAt = me.shift ? new Date(me.shift.startedAt).getTime() : null;
+
+      // Antes de cualquier `dispatch`: el efecto del GPS puede crear el
+      // vigilante en ese mismo ciclo y tiene que leer ya la cadencia buena.
+      if (me.rules?.positionSeconds) cadencia.current = me.rules.positionSeconds;
+      setConductor({ code: me.driver.code, name: me.driver.name });
+      setQueueOwner(me.driver.code);
+      /*
+       * Con turno abierto y el permiso ya dado, la suscripción se vuelve a
+       * registrar (17/11/2026). La pantalla decía «te avisamos aunque cierres
+       * la aplicación» solo porque había permiso, aunque la suscripción
+       * hubiera caducado o fuera de otro conductor del mismo celular.
+       */
+      if (me.shift && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        void enablePush().then(setPush).catch(() => undefined);
+      }
+      setPlacaDelTurno(me.shift?.plate);
+
+      // La placa del turno abierto manda sobre la recordada: es la que de
+      // verdad está asociada en la base.
+      if (me.shift) {
+        try {
+          window.localStorage.setItem('tax.driver.plate', me.shift.plate);
+        } catch {
+          // Sin almacenamiento, el conductor la escribe de nuevo.
+        }
+      }
+
+      if (me.activeRide) {
+        dispatch({
+          type: 'restore',
+          phase: 'ride',
+          offer: offerFromRide(me.activeRide),
+          rideStatus: me.activeRide.status as 'ASSIGNED' | 'DRIVER_ARRIVED' | 'IN_PROGRESS',
+          shiftStartedAt,
+          totals: me.totals,
+          minRideMinutes: me.rules?.minRideMinutes,
+          radioLlegada: me.rules?.arrivalRadiusMeters,
+        });
+        return;
+      }
+
+      if (me.pendingOffer) {
+        const offer = offerFromRide(me.pendingOffer.ride);
+        dispatch({
+          type: 'restore',
+          phase: 'offer',
+          shiftStartedAt,
+          totals: me.totals,
+          minRideMinutes: me.rules?.minRideMinutes,
+          radioLlegada: me.rules?.arrivalRadiusMeters,
+          offer: {
+            ...offer,
+            distanceKm: me.pendingOffer.distanceKm,
+            etaMinutes: me.pendingOffer.etaMinutes,
+            expiresAt: new Date(me.pendingOffer.expiresAt).getTime(),
+            wave: Math.min(4, Math.max(1, me.pendingOffer.wave)) as Oleada,
+            // Una oferta no lleva cliente aunque venga de la carrera.
+            customerName: undefined,
+            customerPhone: undefined,
+          },
+        });
+        return;
+      }
+
+      // Con turno abierto se vuelve a la espera, no a «fuera de turno»:
+      // ofrecer «iniciar turno» cuando ya hay uno deja al conductor
+      // chocando contra el índice único sin forma de salir.
+      //
+      // Y si estaba en pausa, se vuelve a la pausa. Esta línea decía
+      // 'available' a secas: cualquier recuperación —reconectar el socket,
+      // reabrir la aplicación— le quitaba la pausa al conductor sin que él
+      // tocara nada.
+      dispatch({
+        type: 'restore',
+        phase: me.shift ? (me.shift.paused ? 'paused' : 'available') : 'off_shift',
+        offer: null,
+        shiftStartedAt,
+        totals: me.totals,
+        minRideMinutes: me.rules?.minRideMinutes,
+        radioLlegada: me.rules?.arrivalRadiusMeters,
+      });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        /*
+         * El token NO se borra.
+         *
+         * Un 401 aquí casi nunca quiere decir «esta credencial ya no existe».
+         * Quiere decir que la oficina suspendió al conductor o lo desactivó, y
+         * el servidor deja de resolver su token mientras eso dure; el token
+         * sigue siendo bueno y vuelve a servir en cuanto lo habiliten.
+         *
+         * Borrándolo, una suspensión de media hora le costaba al conductor
+         * volver a entrar con código y PIN. Y si de verdad le
+         * revocaron el celular, guardarlo no le da nada: el servidor no lo
+         * acepta nunca más y va a ver esta misma pantalla.
+         */
+        dispatch({ type: 'logged_out' });
+        setNotice(
+          'Tu sesión no está activa: puede que hayas entrado en otro celular, o que la oficina pausara tu acceso. Entra de nuevo o llama a la oficina.',
+        );
+      } else if (error instanceof ApiError && error.isRetryable) {
+        /*
+         * Sin señal o el servidor reiniciándose: se queda con lo último que
+         * se supo y se reintenta solo. Antes se quedaba en «Entrar» hasta
+         * que el conductor cambiaba de aplicación y volvía.
+         */
+        setNotice('Sin señal: se muestra lo último que se sabía. Se actualiza solo al volver.');
+        reintento.current ??= window.setTimeout(() => {
+          reintento.current = undefined;
+          void restore();
+        }, 15_000);
+      }
+    }
+  }, []);
+  const reintento = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    void restore();
+    // Al volver la red se recupera ya, sin esperar el reintento.
+    const alVolverLaRed = () => {
+      if (storedToken()) void restore();
+    };
+    window.addEventListener('online', alVolverLaRed);
+    return () => window.removeEventListener('online', alVolverLaRed);
+  }, [restore]);
+
+  /*
+   * Versión nueva: se recarga sola, pero solo en un momento seguro —sin
+   * oferta ni carrera en pantalla y sin nada en la cola—. Si llega en medio
+   * de una carrera, espera a que termine.
+   */
+  useEffect(() => prepararSonido(), []);
+
+  const [versionNueva, setVersionNueva] = useState(false);
+  useEffect(() => vigilarActualizaciones(() => setVersionNueva(true)), []);
+  useEffect(() => {
+    if (!versionNueva) return;
+    const seguro = ['login', 'off_shift', 'available', 'paused'].includes(session.phase) && session.queued === 0;
+    if (seguro) window.location.reload();
+  }, [versionNueva, session.phase, session.queued]);
+
+  // Lo último que se supo, para arrancar con ello la próxima vez.
+  useEffect(() => {
+    if (session.phase === 'login') borrarUltimoEstado();
+    else guardarUltimoEstado(session);
+  }, [session]);
+
+  /*
+   * Red del navegador, que es lo único que se puede saber antes de entrar.
+   *
+   * El socket solo se conecta con sesión abierta —sin token el servidor lo
+   * cierra—, así que en la pantalla de acceso su estado es «desconectado»
+   * siempre. Usarlo ahí hacía que la aplicación saludara con «Sin conexión»
+   * a un conductor que tenía internet perfectamente, y encima le ofreciera
+   * guardar acciones para reenviarlas, cosa que no existe antes de entrar.
+   *
+   * `navigator.onLine` no es infalible —da verdadero conectado a un router
+   * sin salida— pero distingue el caso que importa: el celular sin señal en
+   * una vereda frente al celular que sí tiene datos.
+   */
+  const [redDelNavegador, setRedDelNavegador] = useState(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine,
+  );
+
+  useEffect(() => {
+    const marcar = () => setRedDelNavegador(navigator.onLine);
+    window.addEventListener('online', marcar);
+    window.addEventListener('offline', marcar);
+    return () => {
+      window.removeEventListener('online', marcar);
+      window.removeEventListener('offline', marcar);
+    };
+  }, []);
+
+  /* --- acceso en pausa: se vuelve a intentar al volver a la aplicación ---- */
+  /*
+   * Token guardado y la pantalla de acceso delante significa suspendido o
+   * desactivado, no sin credencial. Se vuelve a preguntar cada vez que el
+   * conductor trae la aplicación al frente: así, en cuanto la oficina lo
+   * habilita, entra solo sin escribir nada.
+   */
+  useEffect(() => {
+    if (session.phase !== 'login' || !storedToken()) return;
+
+    const alVolver = () => {
+      if (document.visibilityState === 'visible') void restore();
+    };
+
+    document.addEventListener('visibilitychange', alVolver);
+    return () => document.removeEventListener('visibilitychange', alVolver);
+  }, [session.phase, restore]);
+
+  /* --- socket: ofertas y cambios de la carrera propia ---------------------- */
+
+  /*
+   * La sesión viva, para los manejadores del socket.
+   *
+   * El efecto de abajo dependía de `session.phase` y del identificador de la
+   * oferta, así que *cualquier* cambio de fase desmontaba el socket y lo
+   * volvía a montar. Al reconectar se pide el estado, y eso devolvía al
+   * conductor a «esperando carrera»: tomar una pausa la deshacía sola un
+   * segundo después. Con la referencia los manejadores siguen viendo el
+   * valor último sin que el socket se entere de nada.
+   */
+  const sesionViva = useRef(session);
+  useEffect(() => {
+    sesionViva.current = session;
+  }, [session]);
+
+  const conSesion = session.phase !== 'login';
+
+  useEffect(() => {
+    if (!conSesion) return;
+
+    const disconnect = connectDriverSocket({
+      onConnectionChange: (connected) => {
+        dispatch({ type: 'set_online', online: connected });
+        // Al reconectar puede haber una oferta o una carrera que no se vio.
+        // Primero lo que quedó en la cola y después el estado: si no, un
+        // «Llegué» todavía sin enviar haría retroceder la pantalla.
+        if (connected) void flush().finally(() => void restore());
+      },
+
+      onOffer: (push: OfferPush) => {
+        dispatch({ type: 'offer_received', offer: offerFromSocket(push) });
+        // Con la aplicación abierta, el socket es la entrega: se confirma
+        // para que el panel no la cuente como «sin confirmar».
+        if (push.offerId && push.firma) confirmarAviso(push.offerId, push.firma);
+      },
+
+      onOfferRevoked: (rideId) => {
+        // Llega a todos los conductores; solo importa si es la que se está
+        // mirando ahora mismo.
+        const actual = sesionViva.current;
+        if (actual.phase === 'offer' && actual.offer?.rideId === rideId) {
+          dispatch({ type: 'offer_rejected' });
+          setNotice('Otro conductor tomó la carrera.');
+        }
+      },
+
+      onRideChanged: () => {
+        void restore();
+      },
+
+      // Le cerraron el turno: otro tomó su móvil o la oficina lo suspendió.
+      // Se dice por qué y se vuelve a preguntar el estado, que lo lleva a
+      // «fuera de turno» o, si está suspendido, a la pantalla de acceso.
+      onShiftClosed: (motivo) => {
+        setNotice(motivo);
+        void restore();
+      },
+      onSessionClosed: (motivo) => {
+        // Esta credencial no vuelve a servir: se borra y se pide entrar.
+        storeToken(null);
+        setConductor(undefined);
+        setPlacaDelTurno(undefined);
+        dispatch({ type: 'logged_out' });
+        setNotice(motivo);
+      },
+    });
+
+    return disconnect;
+  }, [conSesion, restore]);
+
+  /* --- posición: solo con turno abierto ------------------------------------ */
+  useEffect(() => {
+    const onShift =
+      session.phase === 'available' || session.phase === 'paused' || session.phase === 'ride';
+
+    if (!onShift) {
+      positionWatcher.current?.stop();
+      positionWatcher.current = undefined;
+      return;
+    }
+
+    positionWatcher.current ??= watchPosition({
+      onError: setNotice,
+      intervals: () => cadencia.current,
+      onPosition: (punto) => {
+        const destino = puntoDeRecogida.current;
+        if (destino) dispatch({ type: 'approach', meters: haversineKm(punto, destino) * 1000 });
+      },
+    });
+    positionWatcher.current.setRideId(session.phase === 'ride' ? session.offer?.rideId : undefined);
+
+    return () => {
+      if (session.phase === 'off_shift' || session.phase === 'login') {
+        positionWatcher.current?.stop();
+        positionWatcher.current = undefined;
+      }
+    };
+  }, [session.phase, session.offer?.rideId]);
+
+  const yendoAlPunto =
+    session.phase === 'ride' &&
+    (session.rideStatus === 'ASSIGNED' || session.rideStatus === 'DRIVER_ARRIVED');
+  const pickupLat = yendoAlPunto ? session.offer?.pickupPoint?.lat : undefined;
+  const pickupLng = yendoAlPunto ? session.offer?.pickupPoint?.lng : undefined;
+  useEffect(() => {
+    puntoDeRecogida.current =
+      pickupLat !== undefined && pickupLng !== undefined ? { lat: pickupLat, lng: pickupLng } : undefined;
+    // Si el GPS ya tiene posición, la distancia se pone al día sin esperar
+    // a la próxima lectura: al reabrir la aplicación, por ejemplo.
+    const ultima = positionWatcher.current?.last();
+    if (ultima && puntoDeRecogida.current) {
+      dispatch({ type: 'approach', meters: haversineKm(ultima, puntoDeRecogida.current) * 1000 });
+    }
+  }, [pickupLat, pickupLng]);
+
+  /* --- cola sin conexión --------------------------------------------------- */
+  useEffect(() => {
+    const unwatchQueue = onQueueChange((pending) => {
+      dispatch(pending.length > 0 ? { type: 'queued', count: pending.length } : { type: 'flush_queue' });
+    });
+    // Lo que el servidor rechazó al reenviarlo se le dice al conductor, en
+    // vez de quedar solo en la consola.
+    const unwatchRechazos = onQueueRejected(({ accion, motivo }) => {
+      setNotice(`No se registró «${NOMBRE_DE_ETAPA[accion.path.split('/').pop() ?? ''] ?? 'una acción'}»: ${motivo}`);
+      void restore();
+    });
+    const unwatchConnection = watchConnection();
+    return () => {
+      unwatchQueue();
+      unwatchRechazos();
+      unwatchConnection();
+    };
+  }, []);
+
+  /* --- la pantalla no se apaga mientras haya turno (Wake Lock API) -------- */
+
+  const enTurno =
+    session.phase === 'available' || session.phase === 'paused' || session.phase === 'ride';
+
+  /*
+   * Antes solo durante la carrera; ahora todo el turno, y es lo que sostiene
+   * el mapa de la oficina.
+   *
+   * Una PWA no puede leer el GPS con la aplicación cerrada: la API de
+   * geolocalización no existe dentro del service worker, así que sin página
+   * viva no hay posición que mandar —ni con permiso «siempre», que en la web
+   * no existe—. Y en segundo plano Android congela la pestaña a los pocos
+   * minutos de taparla. Lo único que sí está en nuestra mano es que la
+   * pantalla no se apague sola mientras el conductor tiene turno abierto.
+   *
+   * El navegador suelta el bloqueo él mismo cada vez que la página se
+   * oculta, y NO lo devuelve al volver: de ahí que se vuelva a pedir en cada
+   * `visibilitychange`. Sin eso, bloquear el teléfono una sola vez dejaba la
+   * pantalla libre para apagarse el resto del turno, que es justo el caso
+   * por el que la oficina dejaba de ver al taxi.
+   */
+  useEffect(() => {
+    if (!enTurno) return;
+    let sentinel: WakeLockSentinel | undefined;
+    let cancelled = false;
+
+    const pedir = () => {
+      if (cancelled || sentinel !== undefined || document.visibilityState !== 'visible') return;
+      void navigator.wakeLock
+        ?.request('screen')
+        .then((lock) => {
+          if (cancelled) return void lock.release();
+          sentinel = lock;
+          // Soltado por el navegador al taparse la página: se olvida para
+          // poder volver a pedirlo cuando el conductor vuelva.
+          lock.addEventListener('release', () => {
+            if (sentinel === lock) sentinel = undefined;
+          });
+        })
+        .catch(() => undefined);
+    };
+
+    const alVolver = () => {
+      if (document.visibilityState !== 'visible') return;
+      pedir();
+      /*
+       * Volver a la vista es el momento en que la oficina lleva más tiempo
+       * sin saber nada de este taxi: mientras la página estuvo tapada el
+       * navegador pudo congelarla. La posición sale ya, sin esperar a que
+       * venza la cadencia.
+       */
+      positionWatcher.current?.flush();
+    };
+
+    pedir();
+    document.addEventListener('visibilitychange', alVolver);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', alVolver);
+      void sentinel?.release();
+    };
+  }, [enTurno]);
+
+  /* --- comandos ------------------------------------------------------------ */
+
+  /*
+   * Lo que se está enviando, para no mandar dos veces lo mismo: con señal
+   * débil el conductor toca otra vez creyendo que no pasó nada.
+   */
+  const enCurso = useRef(new Set<string>());
+  const [enviando, setEnviando] = useState(false);
+
+  const mensajeDe = (error: unknown) =>
+    error instanceof ApiError
+      ? error.code === 'RIDE_ALREADY_TAKEN'
+        ? 'Otro conductor la tomó primero.'
+        : error.message
+      : 'No se pudo completar la acción.';
+
+  /** Etapas de una carrera suya: si no hay señal, se guardan y la pantalla avanza. */
+  const command = useCallback(
+    async (path: string, optimistic: () => void, body?: unknown) => {
+      if (enCurso.current.has(path)) return;
+      enCurso.current.add(path);
+      setEnviando(true);
+      try {
+        const result = await send(path, body);
+        optimistic();
+        if (result.status === 'queued') {
+          setNotice('Guardado: se enviará al volver la señal.');
+        }
+      } catch (error) {
+        setNotice(mensajeDe(error));
+        void restore();
+      } finally {
+        enCurso.current.delete(path);
+        setEnviando(enCurso.current.size > 0);
+      }
+    },
+    [restore],
+  );
+
+  /**
+   * Aceptar una oferta y el turno: directo, sin la cola (17/11/2026). Un
+   * «Aceptar» guardado sin señal llevaba al conductor a la pantalla de la
+   * carrera sin que el servidor se la hubiera dado; un «Iniciar turno»
+   * guardado lo dejaba creyéndose disponible sin recibir nada. Sin señal se
+   * le dice, y lo intenta de nuevo.
+   */
+  const directo = useCallback(
+    async (path: string, optimistic: () => void, body?: unknown, sinSenal = 'Sin señal: no se pudo enviar. Inténtalo de nuevo.') => {
+      if (enCurso.current.has(path)) return;
+      enCurso.current.add(path);
+      setEnviando(true);
+      try {
+        await api.post(path, body);
+        optimistic();
+      } catch (error) {
+        setNotice(error instanceof ApiError && error.isRetryable ? sinSenal : mensajeDe(error));
+        if (!(error instanceof ApiError && error.isRetryable)) void restore();
+      } finally {
+        enCurso.current.delete(path);
+        setEnviando(enCurso.current.size > 0);
+      }
+    },
+    [restore],
+  );
+
+  const login = useCallback(
+    async (code: string, pin: string): Promise<string | null> => {
+      try {
+        const response = await api.login<{ token: string }>('/v1/auth/driver', {
+          code,
+          pin,
+          device: navigator.userAgent.slice(0, 100),
+          install: installId(),
+        });
+        storeToken(response.token);
+        dispatch({ type: 'login' });
+        await restore();
+        return null;
+      } catch (error) {
+        if (error instanceof ApiError && error.isOffline) {
+          return 'Sin conexión con el servidor.';
+        }
+        // Con el PIN correcto la API dice hasta cuándo: «PIN incorrecto» lo
+        // mandaría a pedir otro a la oficina sin necesidad.
+        if (error instanceof ApiError && error.code === 'DRIVER_SUSPENDED') {
+          return error.message;
+        }
+        return 'Código o PIN incorrectos.';
+      }
+    },
+    [restore],
+  );
+
+  /*
+   * Cambiar de carro y cambiar de conductor (17/11/2026).
+   *
+   * Directo, sin la cola de sin conexión, como cancelar: hecho más tarde,
+   * cuando vuelva la señal, podría caer sobre un turno que ya cambió. Sin
+   * señal se le dice y lo intenta de nuevo.
+   */
+  const cambiarDeCarro = useCallback(
+    async (plate: string): Promise<string | null> => {
+      try {
+        const turno = await api.post<{ plate: string }>('/v1/driver/shift/switch', { plate });
+        try {
+          window.localStorage.setItem('tax.driver.plate', turno.plate);
+        } catch {
+          // Sin almacenamiento la escribe la próxima vez.
+        }
+        setPlacaDelTurno(turno.plate);
+        await restore();
+        setNotice(`Listo: ahora vas en el ${turno.plate}.`);
+        return null;
+      } catch (error) {
+        if (error instanceof ApiError && error.isOffline) return 'Sin señal: no se pudo cambiar de carro.';
+        return error instanceof ApiError ? error.message : 'No se pudo cambiar de carro. Inténtalo de nuevo.';
+      }
+    },
+    [restore],
+  );
+
+  const cambiarDeConductor = useCallback(async (): Promise<string | null> => {
+    // Lo que el que sale dejó guardado se envía antes; si no se puede, no se
+    // cierra la sesión: se perdería, o le llegaría al servidor con el token
+    // del que entra.
+    await flush();
+    if (pendingCount() > 0) {
+      return 'Hay acciones guardadas sin enviar. Espera a tener señal y vuelve a intentarlo.';
+    }
+    try {
+      await api.post('/v1/driver/logout');
+    } catch (error) {
+      if (error instanceof ApiError && error.isOffline) return 'Sin señal: no se pudo cerrar la sesión.';
+      // Con la sesión ya revocada (por ejemplo, otro conductor entró en este
+      // celular) no hay nada que cerrar: se sigue a la pantalla de acceso.
+      if (!(error instanceof ApiError && error.status === 401)) {
+        return error instanceof ApiError ? error.message : 'No se pudo cerrar la sesión. Inténtalo de nuevo.';
+      }
+    }
+    /*
+     * La suscripción de push del navegador se conserva: es la de este
+     * celular, y la API ya la quitó de la cuenta del que sale. Cuando el que
+     * entra abra su turno, se registra a su nombre.
+     */
+    storeToken(null);
+    if (conductor) clearQueueOf(conductor.code);
+    setQueueOwner(undefined);
+    setConductor(undefined);
+    setPlacaDelTurno(undefined);
+    dispatch({ type: 'logged_out' });
+    setNotice('Sesión cerrada. Ahora entra el otro conductor con su código y su PIN.');
+    return null;
+  }, [conductor]);
+
+  const rideId = session.offer?.rideId;
+
+  /*
+   * Antes de entrar, el indicador habla de la red del teléfono; después, del
+   * socket, que es lo que de verdad determina si llegarán las ofertas.
+   */
+  const enLinea = session.phase === 'login' ? redDelNavegador : session.online;
+
+  const chrome = (children: ReactNode) => (
+    <MotionConfig reducedMotion="user">
+      <div className="relative mx-auto flex h-dvh max-w-md flex-col overflow-hidden bg-canvas">
+        <TopStatus
+          online={enLinea}
+          queued={session.queued}
+          notice={notice}
+          onDismissNotice={() => setNotice(undefined)}
+          offlineHint={
+            session.phase === 'login' ? 'revisa los datos del celular para entrar' : undefined
+          }
+          right={
+            enLinea ? (
+              <Wifi className="size-3.5 text-on-ink-muted" />
+            ) : (
+              <WifiOff className="size-3.5 text-legend-warning" />
+            )
+          }
+        />
+        {children}
+      </div>
+    </MotionConfig>
+  );
+
+  /*
+   * El acceso es otro modo de la aplicación, no un paso del flujo de la
+   * carrera: queda fuera del `AnimatePresence` que encadena las pantallas.
+   * Mezclarlos hacía que la transición de salida del acceso no terminara
+   * nunca y la aplicación se quedara en la pantalla de entrada con la sesión
+   * ya abierta por debajo.
+   */
+  if (session.phase === 'login') {
+    return chrome(<Acceso onSubmit={login} />);
+  }
+
+  return chrome(
+    <>
+      {/*
+        * Sin `AnimatePresence`: la pantalla saliente no aporta nada aquí —el
+        * conductor mira la que llega— y encadenar salida y entrada deja la
+        * puerta abierta a que un render a destiempo congele la transición y
+        * el conductor se quede viendo la pantalla anterior con el estado ya
+        * cambiado. La dirección de entrada basta para decir si la carrera
+        * avanza o retrocede.
+        */}
+      {/* Con el turno abierto y esperando, la pantalla va sobre el amarillo de
+          marca (HU-UI-01), también detrás de las esquinas del pie. */}
+      <motion.div
+          key={session.phase}
+          variants={screenTransition(direction)}
+          initial="hidden"
+          animate="visible"
+          className={cn(
+            'flex min-h-0 flex-1 flex-col',
+            (session.phase === 'available' || session.phase === 'paused') && 'bg-brand',
+          )}
+        >
+            {session.phase === 'off_shift' || session.phase === 'available' || session.phase === 'paused' ? (
+              <Turno
+                session={session}
+                conductor={conductor}
+                placaDelTurno={placaDelTurno}
+                onSwitchVehicle={cambiarDeCarro}
+                onChangeDriver={cambiarDeConductor}
+                push={push}
+                onEnablePush={() => void enablePush().then(setPush).catch(() => undefined)}
+                onStartShift={(plate) =>
+                  void directo('/v1/driver/shift/open', () => {
+                    dispatch({ type: 'shift_opened' });
+                    setPlacaDelTurno(plate);
+                    /*
+                     * El permiso se pide aquí y no al abrir la aplicación:
+                     * preguntarlo nada más entrar es la forma más rápida de
+                     * que lo denieguen, y denegado no se puede volver a
+                     * preguntar desde la web.
+                     */
+                    void enablePush().then(setPush).catch(() => undefined);
+                  }, { plate })
+                }
+                onEndShift={() =>
+                  void directo('/v1/driver/shift/close', () => {
+                    dispatch({ type: 'end_shift' });
+                    setPlacaDelTurno(undefined);
+                    // Fuera de turno no llegan ofertas: tampoco avisos.
+                    void disablePush().catch(() => undefined);
+                  })
+                }
+                onPause={() =>
+                  void directo('/v1/driver/shift/pause', () => dispatch({ type: 'pause' }))
+                }
+                onResume={() =>
+                  void directo('/v1/driver/shift/resume', () => dispatch({ type: 'resume' }))
+                }
+              />
+            ) : null}
+
+            {session.phase === 'offer' && session.offer ? (
+              <Oferta
+                offer={session.offer}
+                onAccept={() =>
+                  void directo(
+                    `/v1/driver/rides/${rideId}/accept`,
+                    () => {
+                      dispatch({ type: 'offer_accepted' });
+                      // Con la carrera ya suya llegan el cliente y su teléfono.
+                      void restore();
+                    },
+                    undefined,
+                    'Sin señal: la carrera NO quedó aceptada. Inténtalo de nuevo antes de que venza.',
+                  )
+                }
+                onReject={() =>
+                  // Sin señal se rechaza igual en la pantalla: la oferta vence sola.
+                  void directo(`/v1/driver/rides/${rideId}/reject`, () => dispatch({ type: 'offer_rejected' })).then(
+                    () => {
+                      if (sesionViva.current.phase === 'offer') dispatch({ type: 'offer_rejected' });
+                    },
+                  )
+                }
+                onExpire={() => dispatch({ type: 'offer_expired' })}
+              />
+            ) : null}
+
+            {session.phase === 'ride' && session.offer ? (
+              <Carrera
+                offer={session.offer}
+                status={session.rideStatus}
+                metersToPickup={session.metersToPickup}
+                minRideMinutes={session.minRideMinutes}
+                radioLlegada={session.radioLlegada}
+                enviando={enviando}
+                onArrived={() =>
+                  void command(
+                    `/v1/driver/rides/${rideId}/arrived`,
+                    () => dispatch({ type: 'arrived' }),
+                    { at: positionWatcher.current?.last() },
+                  )
+                }
+                onBoard={() =>
+                  void command(
+                    `/v1/driver/rides/${rideId}/board`,
+                    () => dispatch({ type: 'passenger_on_board' }),
+                    { at: positionWatcher.current?.last() },
+                  )
+                }
+                onFinish={() =>
+                  void command(
+                    `/v1/driver/rides/${rideId}/finish`,
+                    () => dispatch({ type: 'finish' }),
+                    { at: positionWatcher.current?.last() },
+                  )
+                }
+                onCancel={async (motivo, detalle) => {
+                  /*
+                   * Directo, sin la cola de sin conexión: cancelar más tarde,
+                   * cuando vuelva la señal, podría caer sobre una carrera que
+                   * ya cambió. Sin señal se le dice, y que llame a la oficina.
+                   */
+                  try {
+                    await api.post(`/v1/driver/rides/${rideId}/cancel`, {
+                      motivo,
+                      detalle,
+                      at: positionWatcher.current?.last(),
+                    });
+                    const code = session.offer?.code;
+                    dispatch({ type: 'back_to_available' });
+                    setNotice(
+                      motivo === 'cliente_no_aparece'
+                        ? `Cancelaste la carrera ${code ?? ''}. La oficina ya tiene el motivo.`
+                        : `Soltaste la carrera ${code ?? ''}. Al cliente ya le estamos buscando otro taxi.`,
+                    );
+                    return null;
+                  } catch (error) {
+                    if (error instanceof ApiError && error.isOffline) {
+                      return 'Sin señal: no se pudo cancelar. Si es urgente, llama a la oficina.';
+                    }
+                    void restore();
+                    return error instanceof ApiError ? error.message : 'No se pudo cancelar. Inténtalo de nuevo.';
+                  }
+                }}
+              />
+            ) : null}
+
+            {session.phase === 'summary' ? (
+              <Resumen
+                offer={session.offer}
+                session={session}
+                onContinue={() => dispatch({ type: 'back_to_available' })}
+              />
+            ) : null}
+        </motion.div>
+    </>,
+  );
+}

@@ -1,0 +1,12 @@
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+.kotlin/
+captures/
+build-log.txt
+lint-log.txt
+logcat-*.txt
+capturas/
+monitor-*.tsv

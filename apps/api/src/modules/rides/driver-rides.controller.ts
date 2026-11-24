@@ -1,0 +1,299 @@
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
+import type { FastifyReply, FastifyRequest } from 'fastify';
+import { z } from 'zod';
+import {
+  CANCELABLE_POR_EL_CONDUCTOR,
+  cancelacionConductorSchema,
+  cancelacionRelanza,
+  haversineKm,
+  pointSchema,
+  textoDelMotivo,
+} from '@tax/shared';
+import { zodBody } from '../../common/zod.pipe';
+import { AppError } from '../../common/problem';
+import { loadEnv } from '../../config/env';
+import { DriverGuard } from '../identity/guards';
+import { RidesService, type Actor } from './rides.service';
+import { DispatchService } from '../dispatch/dispatch.service';
+import { FleetService } from '../fleet/fleet.service';
+import { FotosService } from './fotos.service';
+import { RealtimeGateway } from '../../realtime/realtime.gateway';
+
+const atSchema = z.object({ at: pointSchema.optional() });
+const cancelarSchema = cancelacionConductorSchema.and(atSchema);
+
+/**
+ * Comandos del conductor sobre su carrera.
+ *
+ * Un conductor solo ve y toca las carreras ofrecidas o asignadas a él; la
+ * comprobación es por objeto, no solo por rol (§8.1).
+ */
+@Controller('v1/driver/rides')
+@UseGuards(DriverGuard)
+export class DriverRidesController {
+  private readonly env = loadEnv();
+
+  constructor(
+    private readonly rides: RidesService,
+    private readonly dispatch: DispatchService,
+    private readonly fleet: FleetService,
+    private readonly fotos: FotosService,
+    private readonly realtime: RealtimeGateway,
+  ) {}
+
+  /**
+   * La foto del lugar que mandó el cliente. Solo para el conductor de la
+   * carrera, y solo mientras va a recogerlo: es la puerta de una casa.
+   */
+  @Get(':rideId/photo')
+  async photo(
+    @Req() request: FastifyRequest,
+    @Param('rideId', ParseUUIDPipe) rideId: string,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    const ride = await this.ownRide(rideId, requireDriver(request).id);
+    if (ride.status !== 'ASSIGNED' && ride.status !== 'DRIVER_ARRIVED') {
+      throw new AppError('NOT_FOUND', 'La foto solo se ve mientras vas a recoger al cliente');
+    }
+    const foto = await this.fotos.leer(rideId);
+    if (!foto) throw new AppError('NOT_FOUND', 'Esta carrera no tiene foto');
+    void reply.header('content-type', foto.mimeType).header('cache-control', 'private, no-store');
+    return foto.content;
+  }
+
+  /**
+   * Lo que la PWA necesita al abrir: quién es, si tiene carrera en curso y si
+   * hay una oferta esperando. Es la primera llamada de la aplicación.
+   */
+  @Get('me')
+  async me(@Req() request: FastifyRequest) {
+    const driver = requireDriver(request);
+
+    const [session, shift, totals] = await Promise.all([
+      this.rides.driverSession(driver.id),
+      this.fleet.currentShift(driver.id),
+      this.fleet.todayTotals(driver.id),
+    ]);
+
+    return {
+      driver: { id: driver.id, code: driver.code, name: driver.name },
+      shift,
+      totals,
+      /*
+       * Las reglas que la PWA necesita para comportarse igual que el
+       * servidor. Vienen de aquí para que cambiarlas en el entorno de la API
+       * no deje a la PWA haciendo otra cosa ni obligue a recompilarla:
+       *
+       *  - `minRideMinutes`: los minutos que tiene bloqueado «Finalizar».
+       *  - `positionSeconds`: cada cuánto manda la posición, en carrera y en
+       *    espera. Es lo que marca cada cuánto se mueve su taxi en el mapa
+       *    de la oficina, porque cada envío se reparte por el socket.
+       */
+      rules: {
+        minRideMinutes: this.env.MIN_DURACION_CARRERA_MIN,
+        // El radio de «Llegué» (17/11/2026): la PWA lo tenía fijo en 150 m,
+        // y si la oficina cambiaba `ARRIVAL_RADIUS_METERS` la pantalla decía
+        // una cosa y el servidor registraba otra.
+        arrivalRadiusMeters: this.env.ARRIVAL_RADIUS_METERS,
+        positionSeconds: {
+          ride: this.env.POSITION_REPORT_RIDE_SECONDS,
+          idle: this.env.POSITION_REPORT_IDLE_SECONDS,
+        },
+      },
+      ...session,
+    };
+  }
+
+  @Post(':rideId/accept')
+  accept(@Req() request: FastifyRequest, @Param('rideId', ParseUUIDPipe) rideId: string) {
+    const driver = requireDriver(request);
+    return this.dispatch.accept(rideId, driver.id, actorFrom(request));
+  }
+
+  @Post(':rideId/reject')
+  async reject(@Req() request: FastifyRequest, @Param('rideId', ParseUUIDPipe) rideId: string) {
+    await this.dispatch.reject(rideId, requireDriver(request).id);
+    return { ok: true };
+  }
+
+  /**
+   * «Llegué». A menos de 150 m del punto es normal; más lejos se acepta
+   * igual, pero queda registrada la excepción (§5.3). El conductor no se
+   * queda bloqueado por un GPS impreciso en una vereda.
+   *
+   * En una carrera sin ubicar no se mide: su punto es el centro del pueblo,
+   * no el del cliente, y toda llegada saldría como excepción.
+   */
+  @Post(':rideId/arrived')
+  async arrived(
+    @Req() request: FastifyRequest,
+    @Param('rideId', ParseUUIDPipe) rideId: string,
+    @Body(zodBody(atSchema)) body: z.infer<typeof atSchema>,
+  ) {
+    const driver = requireDriver(request);
+    const ride = await this.ownRide(rideId, driver.id);
+
+    let note: string | undefined;
+    if (body.at && ride.pickupLat && ride.pickupLng && ride.pickupSource !== 'sin_ubicar') {
+      const meters =
+        haversineKm(body.at, { lat: ride.pickupLat, lng: ride.pickupLng }) * 1000;
+      if (meters > this.env.ARRIVAL_RADIUS_METERS) {
+        note = `Excepción: marcó llegada a ${Math.round(meters)} m del punto`;
+      }
+    }
+
+    return this.rides.transition(rideId, 'DRIVER_ARRIVED', actorFrom(request), {
+      note,
+      at: body.at,
+      patch: { arrivedAt: new Date() },
+      event: { type: 'ride.driver_arrived' },
+    });
+  }
+
+  @Post(':rideId/board')
+  async board(
+    @Req() request: FastifyRequest,
+    @Param('rideId', ParseUUIDPipe) rideId: string,
+    @Body(zodBody(atSchema)) body: z.infer<typeof atSchema>,
+  ) {
+    const driver = requireDriver(request);
+    await this.ownRide(rideId, driver.id);
+
+    return this.rides.transition(rideId, 'IN_PROGRESS', actorFrom(request), {
+      note: 'Pasajero a bordo',
+      at: body.at,
+      patch: { startedAt: new Date() },
+      event: { type: 'ride.started' },
+    });
+  }
+
+  @Post(':rideId/finish')
+  async finish(
+    @Req() request: FastifyRequest,
+    @Param('rideId', ParseUUIDPipe) rideId: string,
+    @Body(zodBody(atSchema)) body: z.infer<typeof atSchema>,
+  ) {
+    const driver = requireDriver(request);
+    const ride = await this.ownRide(rideId, driver.id);
+
+    /*
+     * Tiempo mínimo a bordo. La PWA tiene el botón bloqueado esos minutos,
+     * pero eso es cortesía: quien quiera saltárselo llama a la API sin la
+     * PWA, y aquí es donde de verdad se impide. La oficina sí puede cerrar
+     * antes desde el panel, que es otra ruta: para eso está.
+     */
+    const minimoMs = this.env.MIN_DURACION_CARRERA_MIN * 60_000;
+    if (ride.status === 'IN_PROGRESS' && ride.startedAt) {
+      const faltanMs = ride.startedAt.getTime() + minimoMs - Date.now();
+      if (faltanMs > 0) {
+        const minutos = Math.ceil(faltanMs / 60_000);
+        throw new AppError(
+          'RIDE_TOO_SHORT',
+          `Todavía no se puede finalizar: falta${minutos === 1 ? '' : 'n'} ${minutos} ${minutos === 1 ? 'minuto' : 'minutos'}`,
+        );
+      }
+    }
+
+    /*
+     * Aqui es donde la carrera consigue su destino. Casi nadie lo dice por
+     * WhatsApp —lo dice ya montado en el carro—, asi que hasta este momento
+     * la mayoria de carreras solo tienen punto de partida. La posicion del
+     * conductor al cerrar es el destino, y con el salen la distancia y la
+     * tarifa real.
+     */
+    const cierre = await this.rides.cierreDeCarrera(ride, body.at);
+
+    const updated = await this.rides.transition(rideId, 'COMPLETED', actorFrom(request), {
+      at: body.at,
+      note: cierre.note,
+      patch: { finishedAt: new Date(), ...cierre.patch },
+      event: {
+        type: 'ride.completed',
+        payload: { distanceKm: cierre.patch.distanceKm },
+      },
+    });
+
+    // El conductor vuelve a Disponible, condición de la transición (§5.3).
+    await this.dispatch.releaseDriver(driver.id);
+    return updated;
+  }
+
+  /** Comprueba que la carrera es de este conductor antes de dejar tocarla. */
+  /**
+   * El conductor cancela su carrera por una causa mayor, con motivo.
+   *
+   * Solo antes de recoger al cliente: asignada o en el lugar. Con el pasajero
+   * a bordo ya no: la carrera se termina, o la oficina decide. La máquina de
+   * estados también lo impide; aquí se dice con palabras del conductor.
+   *
+   * Queda en la bitácora de la carrera (con dónde estaba el conductor), en la
+   * auditoría y en Reportes, y la oficina recibe una alerta: el cliente se
+   * quedó sin taxi y alguien tiene que ocuparse.
+   */
+  @Post(':rideId/cancel')
+  async cancel(
+    @Req() request: FastifyRequest,
+    @Param('rideId', ParseUUIDPipe) rideId: string,
+    @Body(zodBody(cancelarSchema)) body: z.infer<typeof cancelarSchema>,
+  ) {
+    const driver = requireDriver(request);
+    const ride = await this.ownRide(rideId, driver.id);
+    if (!(CANCELABLE_POR_EL_CONDUCTOR as readonly string[]).includes(ride.status)) {
+      throw new AppError(
+        'INVALID_TRANSITION',
+        ride.status === 'IN_PROGRESS'
+          ? 'Con el pasajero a bordo ya no se puede cancelar: termina la carrera o llama a la oficina.'
+          : 'Esta carrera ya no se puede cancelar.',
+      );
+    }
+
+    const motivo = textoDelMotivo(body.motivo, body.detalle);
+
+    /*
+     * Fuerza mayor (21/11/2026): la carrera no se cancela, se le busca otro
+     * taxi al cliente y se le avisa cuando lo haya. Solo «El cliente no
+     * aparece» la cierra.
+     */
+    if (cancelacionRelanza(body.motivo)) {
+      return this.dispatch.soltarPorFuerzaMayor(
+        rideId,
+        { id: driver.id, name: driver.name, code: driver.code },
+        { clave: body.motivo, texto: motivo },
+        body.at,
+      );
+    }
+
+    // El motivo va solo: quién canceló ya queda en `cancelled_by` y en la
+    // bitácora, y así se lee igual en el panel, en Reportes y en n8n.
+    const cancelada = await this.rides.cancel(rideId, motivo, actorFrom(request), {
+      code: body.motivo,
+      at: body.at,
+    });
+
+    this.realtime.alertOffice({
+      kind: 'driver_cancelled',
+      rideId,
+      code: ride.code,
+      message: `${driver.name} (${driver.code}) canceló ${ride.code}: ${motivo}. Se cerró la carrera y se le avisó al cliente.`,
+    });
+    return cancelada;
+  }
+
+  private async ownRide(rideId: string, driverId: string) {
+    const ride = await this.rides.byId(rideId);
+    if (ride.driverId !== driverId) {
+      throw new AppError('FORBIDDEN', 'Esa carrera no está asignada a este conductor');
+    }
+    return ride;
+  }
+}
+
+function requireDriver(request: FastifyRequest) {
+  if (!request.driver) throw new AppError('UNAUTHORIZED', 'Sin conductor en la petición');
+  return request.driver;
+}
+
+function actorFrom(request: FastifyRequest): Actor {
+  const driver = requireDriver(request);
+  return { kind: 'driver', name: driver.name, id: driver.id, role: 'conductor', ip: request.ip };
+}

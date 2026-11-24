@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Colores de packages/ui/src/styles/tokens.css: tinta #141414 y
+         amarillo #FBD31A. -->
+    <style name="Theme.SogaTaxi" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#141414</item>
+        <item name="android:navigationBarColor">#141414</item>
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>
