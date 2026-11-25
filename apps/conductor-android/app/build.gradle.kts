@@ -58,9 +58,9 @@ android {
         release {
             if (hayFirma) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
-            // PENDIENTE: el dominio de producción de la API de SogaTaxi. Solo
+            // El dominio de producción de la API de SogaTaxi (25/11/2026). Solo
             // HTTPS: la versión final no permite tráfico en texto plano.
-            buildConfigField("String", "API_BASE", "\"https://api.sogataxi.example\"")
+            buildConfigField("String", "API_BASE", "\"https://api.sogataxi.praxisia.org\"")
             buildConfigField("boolean", "API_EDITABLE", "false")
         }
     }

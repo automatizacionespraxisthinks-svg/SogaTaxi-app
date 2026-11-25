@@ -53,8 +53,8 @@ targets:
           # La API de desarrollo en la red local; se puede cambiar en el acceso.
           API_BASE: "http://192.168.1.3:3000"
         Release:
-          # PENDIENTE: el dominio de producción de la API. Solo HTTPS.
-          API_BASE: "https://api.sogataxi.example"
+          # El dominio de producción de la API. Solo HTTPS.
+          API_BASE: "https://api.sogataxi.praxisia.org"
     info:
       path: iosApp/Info.plist
       properties:
