@@ -60,6 +60,13 @@ interface Plataforma {
 
     fun tienePermisoDeUbicacion(): Boolean
 
+    /**
+     * Ubicación «todo el tiempo», también con la app cerrada. Es lo que se
+     * exige para abrir turno. Por defecto, lo mismo que la de arriba (iPhone
+     * la pide aparte en su arranque).
+     */
+    fun tieneUbicacionSiempre(): Boolean = tienePermisoDeUbicacion()
+
     /** Lo que falta permitir para que el turno funcione con el teléfono bloqueado. */
     fun requisitos(): List<Requisito>
 

@@ -133,6 +133,13 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
         ContextCompat.checkSelfPermission(app, Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
 
+    override fun tieneUbicacionSiempre(): Boolean =
+        tienePermisoDeUbicacion() && (
+            Build.VERSION.SDK_INT < 29 ||
+                ContextCompat.checkSelfPermission(app, Manifest.permission.ACCESS_BACKGROUND_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+            )
+
     override fun requisitos(): List<Requisito> {
         val pantallaCompleta = Build.VERSION.SDK_INT < 34 ||
             app.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
@@ -148,6 +155,7 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
             // muestra el diálogo (dos negativas), `rememberPedirPermisos` abre
             // los ajustes de la app.
             Requisito("Ubicación", tienePermisoDeUbicacion()),
+            Requisito("Ubicación «Permitir todo el tiempo»", tieneUbicacionSiempre()),
             Requisito("GPS del teléfono encendido", gps) {
                 abrirAjuste(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
             },

@@ -4,12 +4,16 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- GPS. Solo "mientras se usa la app": el servicio de turno se abre con
-         la app en pantalla, y un servicio en primer plano iniciado así conserva
-         la ubicación aunque luego se bloquee el teléfono. No se pide
-         ACCESS_BACKGROUND_LOCATION ("permitir siempre"). -->
+    <!-- GPS «Permitir todo el tiempo» (decisión de SogaTaxi, 25/11/2026).
+         Con solo «mientras se usa la app» el turno funciona si se abrió con la
+         app en pantalla, pero si Android revive el servicio con la app cerrada
+         —o en Xiaomi y OPPO, que cortan más— la ubicación se pierde. Con
+         «todo el tiempo» el servicio conserva el GPS en esos casos. Igual el
+         GPS solo se lee con el turno abierto (ver TurnoService). La app no va
+         a Play Store, así que no aplica su revisión de este permiso. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />

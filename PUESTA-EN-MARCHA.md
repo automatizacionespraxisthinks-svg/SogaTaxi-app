@@ -179,8 +179,8 @@ POSITION_PURGE_CRON=0 4 * * *
 PURGE_TIMEZONE=America/Bogota
 
 # Cuando se publique el APK (ver apps/conductor-android/README.md).
-# APP_ANDROID_VERSION_CODE=3
-# APP_ANDROID_VERSION_NAME=0.3.0
+# APP_ANDROID_VERSION_CODE=5
+# APP_ANDROID_VERSION_NAME=0.4.1
 # APP_ANDROID_URL=https://conductor.sogataxi.praxisia.org/sogataxi-conductor.apk
 ```
 

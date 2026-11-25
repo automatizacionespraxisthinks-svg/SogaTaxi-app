@@ -139,6 +139,11 @@ fun PantallaFueraDeTurno(sesion: EstadoSesion, alAbrir: () -> Unit) {
                 error = "Primero permite la ubicación (arriba)."
                 return@BotonGrande
             }
+            if (!plataforma.tieneUbicacionSiempre()) {
+                error = "Permite la ubicación «Todo el tiempo»: si no, el GPS se corta con la app cerrada."
+                pedirPermisos()
+                return@BotonGrande
+            }
             enviando = true
             error = null
             escena.launch {
