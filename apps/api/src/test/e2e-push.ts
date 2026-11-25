@@ -8,6 +8,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { and, eq, isNull } from 'drizzle-orm';
 import * as schema from '../db/schema';
+import { CENTRO } from './coordenadas';
 
 /**
  * Prueba de Web Push contra la API en marcha (ADR-07).
@@ -42,7 +43,6 @@ import * as schema from '../db/schema';
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
 const FAKE_PORT = 4555;
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 
 const DRIVER = { code: '101', plate: 'UBP472' };
 const PIN = '4821';
@@ -255,7 +255,11 @@ async function main(): Promise<void> {
     );
     assert(aviso.headers['content-encoding'] === 'aes128gcm', 'el cuerpo va cifrado (aes128gcm)');
     assert(aviso.bytes > 0, `el cuerpo cifrado ocupa ${aviso.bytes} bytes`);
-    assert(aviso.headers.ttl === '60', 'caduca en 60 s, la ventana de la oleada', aviso.headers.ttl);
+    // El aviso dura lo que le queda a la oferta (PushService.notifyOffer):
+    // la oleada de la zona más el margen, con piso de 30 s. Antes era un 60
+    // fijo, y la prueba seguía esperándolo.
+    const ttl = Number(aviso.headers.ttl);
+    assert(ttl >= 30 && ttl <= 120, `caduca con la oferta (${ttl} s), no se queda en la cola del push`, aviso.headers.ttl);
     assert(aviso.headers.urgency === 'high', 'marcado como urgente');
     assert(Boolean(aviso.headers.topic), 'lleva topic para reemplazar el aviso anterior');
 

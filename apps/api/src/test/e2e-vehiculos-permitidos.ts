@@ -21,8 +21,8 @@ import { base32Decode, totp } from '../common/totp';
  */
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
-const ADMIN = { email: 'prueba-vp-admin@taxturistico.local', pass: 'clave-de-prueba-suficientemente-larga' };
-const OPERADOR = { email: 'prueba-vp-oper@taxturistico.local', pass: 'clave-de-prueba-suficientemente-larga' };
+const ADMIN = { email: 'prueba-vp-admin@sogataxi.local', pass: 'clave-de-prueba-suficientemente-larga' };
+const OPERADOR = { email: 'prueba-vp-oper@sogataxi.local', pass: 'clave-de-prueba-suficientemente-larga' };
 const CODIGO = '905';
 const PLACAS = ['PRV905', 'PRV906', 'PRV907'];
 

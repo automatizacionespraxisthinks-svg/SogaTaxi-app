@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, gte, inArray } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
 import * as schema from '../db/schema';
 import { hashSecret } from '../common/crypto';
@@ -20,8 +20,8 @@ import { base32Decode, totp } from '../common/totp';
  */
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
-const ADMIN = { email: 'prueba-elim-admin@taxturistico.local', pass: 'clave-de-prueba-suficientemente-larga' };
-const OPERADOR = { email: 'prueba-elim-oper@taxturistico.local', pass: 'clave-de-prueba-suficientemente-larga' };
+const ADMIN = { email: 'prueba-elim-admin@sogataxi.local', pass: 'clave-de-prueba-suficientemente-larga' };
+const OPERADOR = { email: 'prueba-elim-oper@sogataxi.local', pass: 'clave-de-prueba-suficientemente-larga' };
 const SIN_HISTORIAL = { code: '903', plate: 'PRB903', phone: '+573110000903' };
 const CON_HISTORIAL = { code: '904', plate: 'PRB904', phone: '+573110000904' };
 
@@ -58,6 +58,9 @@ function crearSesion() {
 const code = (p: unknown) => (p as { code?: string } | null)?.code;
 
 async function main(): Promise<void> {
+  // La bitácora es de solo inserción: las entradas de corridas anteriores
+  // siguen ahí, así que solo se cuentan las de esta.
+  const inicio = new Date(Date.now() - 5_000);
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL ?? 'postgres://tax:tax_dev_password@localhost:55432/tax',
     max: 2,
@@ -224,7 +227,13 @@ async function main(): Promise<void> {
     const entradas = await db
       .select({ actorName: schema.auditLog.actorName, after: schema.auditLog.after, at: schema.auditLog.at })
       .from(schema.auditLog)
-      .where(and(eq(schema.auditLog.action, 'Eliminó un conductor'), inArray(schema.auditLog.entityId, codigos)));
+      .where(
+        and(
+          eq(schema.auditLog.action, 'Eliminó un conductor'),
+          inArray(schema.auditLog.entityId, codigos),
+          gte(schema.auditLog.at, inicio),
+        ),
+      );
     assert(entradas.length === 2, `dos entradas «Eliminó un conductor» (hay ${entradas.length})`);
     assert(entradas.every((e) => e.actorName === 'Admin de prueba'), 'con el nombre de quien lo hizo');
     assert(

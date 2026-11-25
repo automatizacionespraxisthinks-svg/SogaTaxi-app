@@ -27,7 +27,7 @@ import { hashSecret } from '../common/crypto';
  * El rol es la clave de cualquiera de los que hay (los de base, `administrador`
  * y `operador`, o uno creado en el panel).
  *
- *   node dist/cli/crear-usuario.js ana@taxturistico.co "Ana Gómez" administrador
+ *   node dist/cli/crear-usuario.js ana@example.com "Ana Gómez" administrador
  */
 
 async function main(): Promise<void> {

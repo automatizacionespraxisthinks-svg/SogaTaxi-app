@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
 import { uuidv7 } from 'uuidv7';
+import { CENTRO } from './coordenadas';
 
 /**
  * Los arreglos críticos de la auditoría del 17/11/2026, de extremo a extremo.
@@ -28,7 +29,6 @@ const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const KEY = process.argv[2];
 const KEY_SIN_LISTA = process.argv[3];
 const PIN = '4821';
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 
 let fallos = 0;
 function assert(condicion: boolean, mensaje: string, contexto?: unknown): void {

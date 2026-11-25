@@ -114,7 +114,22 @@ export class FotosService {
   constructor(
     @Inject(DB) private readonly db: Database,
     @Inject(AuditService) private readonly audit: AuditService,
-  ) {}
+  ) {
+    /*
+     * Sin lista de servidores, cualquier enlace público vale y la única
+     * defensa es mirar a qué IP resuelve el nombre. Eso tiene una rendija:
+     * entre esa comprobación y la descarga el DNS puede cambiar a una
+     * dirección interna. Con la lista no se resuelve nada ajeno. No se obliga
+     * para no dejar sin arrancar una instalación que hoy funciona, pero se
+     * avisa en cada arranque.
+     */
+    const env = loadEnv();
+    if (env.NODE_ENV === 'production' && env.FOTO_HOSTS_PERMITIDOS.length === 0) {
+      this.logger.warn(
+        'FOTO_HOSTS_PERMITIDOS está vacío: las fotos se bajan de cualquier servidor público. Pon ahí el de Chatwoot.',
+      );
+    }
+  }
 
   /** Guarda la foto (reemplaza la anterior). Devuelve la carrera para avisar del cambio. */
   async guardar(

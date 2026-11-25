@@ -29,7 +29,7 @@ import { base32Decode, totp } from '../common/totp';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const CLAVE = 'clave-de-prueba-suficientemente-larga';
-const USUARIO = 'prueba-export@taxturistico.local';
+const USUARIO = 'prueba-export@sogataxi.local';
 const GUARDAR_EN = process.argv[2];
 
 function assert(condition: boolean, message: string, context?: unknown): void {

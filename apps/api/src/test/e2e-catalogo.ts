@@ -52,7 +52,7 @@ async function main() {
   const hash = createHash('sha256').update(TOKEN, 'utf8').digest('hex');
   await db.query(
     `insert into users (id, email, name, password_hash, role, totp_enabled)
-     values ($1, 'e2e-catalogo@taxturistico.local', 'Prueba Catálogo', 'x', 'administrador', true)
+     values ($1, 'e2e-catalogo@sogataxi.local', 'Prueba Catálogo', 'x', 'administrador', true)
      on conflict (id) do nothing`,
     [USUARIO],
   );
@@ -70,7 +70,7 @@ async function main() {
     const montada = await llamar('/v1/admin/zones', {
       method: 'POST',
       panel: true,
-      body: { name: `Encima del centro ${SUFIJO}`, kind: 'urbano', center: { lat: 5.7803, lng: -73.105 }, radiusKm: 1 },
+      body: { name: `Encima del centro ${SUFIJO}`, kind: 'urbano', center: { lat: 5.7148, lng: -72.919 }, radiusKm: 1 },
     });
     assert(montada.status === 409 && montada.body.code === 'ZONE_OVERLAP', `una zona encima del Centro se rechaza (${montada.status} ${montada.body.code})`, montada.body);
     assert(String(montada.body.detail ?? '').includes('Centro'), 'y dice sobre cuál se monta', montada.body.detail);
@@ -78,7 +78,7 @@ async function main() {
     const nueva = await llamar('/v1/admin/zones', {
       method: 'POST',
       panel: true,
-      body: { name: `Vereda de prueba ${SUFIJO}`, kind: 'rural', center: { lat: 5.875, lng: -73.11 }, radiusKm: 1.5 },
+      body: { name: `Vereda de prueba ${SUFIJO}`, kind: 'rural', center: { lat: 5.810, lng: -72.92 }, radiusKm: 1.5 },
     });
     assert(nueva.status === 201 && typeof nueva.body.id === 'string', `una zona libre se crea (${nueva.status})`, nueva.body);
     zonaId = nueva.body.id;
@@ -128,7 +128,7 @@ async function main() {
       body: {
         name: `Tienda Don Prueba ${SUFIJO}`,
         aliases: [`donde don prueba ${SUFIJO}`, `la tienda azul ${SUFIJO}`, `Donde Don Prueba ${SUFIJO}`],
-        point: { lat: 5.7811, lng: -73.1136 },
+        point: { lat: 5.7156, lng: -72.9273 },
       },
     });
     assert(lugar.status === 201 && typeof lugar.body.id === 'string', `un lugar en el Centro se crea (${lugar.status})`, lugar.body);
@@ -142,7 +142,7 @@ async function main() {
     const robada = await llamar('/v1/admin/places', {
       method: 'POST',
       panel: true,
-      body: { name: `Otra tienda ${SUFIJO}`, aliases: [`DONDE DON PRUEBA ${SUFIJO}`], point: { lat: 5.782, lng: -73.112 } },
+      body: { name: `Otra tienda ${SUFIJO}`, aliases: [`DONDE DON PRUEBA ${SUFIJO}`], point: { lat: 5.716, lng: -72.926 } },
     });
     assert(robada.status === 409 && robada.body.code === 'KEYWORD_TAKEN', `una palabra clave de otro lugar se rechaza (${robada.body.code})`);
 
@@ -162,7 +162,7 @@ async function main() {
     if (carrera.body.id) carreras.push(carrera.body.id);
     assert(carrera.status === 201, `se crea (${carrera.status})`, carrera.body);
     assert(carrera.body.pickupSource === 'catalogo', `ubicada por el catálogo (${carrera.body.pickupSource})`);
-    assert(carrera.body.pickupLat === 5.7811 && carrera.body.pickupLng === -73.1136, 'en el punto del lugar');
+    assert(carrera.body.pickupLat === 5.7156 && carrera.body.pickupLng === -72.9273, 'en el punto del lugar');
 
     const { rows } = await db.query('select uses from places where id = $1', [lugar.body.id]);
     assert(rows[0]?.uses === 1, `y el lugar cuenta un uso (${rows[0]?.uses})`);

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { createHmac } from 'node:crypto';
 import { Pool } from 'pg';
+import { CENTRO } from './coordenadas';
 
 /**
  * Relanzar el despacho de una carrera que nadie aceptó.
@@ -48,10 +49,9 @@ const APARTADOS = [
 ];
 const PIN = '4821';
 
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
-const CERCA = { lat: 5.7813, lng: -73.1132 };
+const CERCA = { lat: 5.7158, lng: -72.9269 };
 /** Unos 19 km al norte: solo la ronda final llega hasta aquí. */
-const LEJOS = { lat: 5.95, lng: -73.1142 };
+const LEJOS = { lat: 5.95, lng: -72.9279 };
 
 interface Oferta { wave: number; intento: number; driverId: string; response: string }
 interface Entrada { wave: number; intento?: number; candidates: number }

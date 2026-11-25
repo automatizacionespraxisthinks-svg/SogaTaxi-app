@@ -22,7 +22,7 @@ import * as schema from '../db/schema';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
-const LUGAR = { name: 'Lugar De Prueba Enlace', lat: 5.7795, lng: -73.1133 };
+const LUGAR = { name: 'Lugar De Prueba Enlace', lat: 5.7140, lng: -72.9270 };
 
 interface Json {
   [key: string]: unknown;
@@ -69,7 +69,7 @@ async function main(): Promise<void> {
     const enlace = `https://www.google.com/maps?q=${LUGAR.lat + 0.0002},${LUGAR.lng}`;
     const uno = await call('/v1/rides', 'POST', {
       customerPhone: telefono(),
-      pickup: { text: 'Carrera 21 # 24-18, Centro, Paipa', link: enlace },
+      pickup: { text: 'Carrera 21 # 24-18, Centro, Sogamoso', link: enlace },
       pagoElectronico: false,
     });
     assert(uno.status < 400, 'la carrera se crea', uno.body);
@@ -98,10 +98,10 @@ async function main(): Promise<void> {
     assert(envuelta.body.pickupReference === 'Portón negro', 'agrega la referencia', envuelta.body.pickupReference);
     assert(envuelta.body.pickupLink === enlace, 'sin ubicación nueva conserva el enlace', envuelta.body.pickupLink);
 
-    const otro = `https://www.google.com/maps/place/Otro/@5.7700,-73.1200,17z/data=!3d5.7712345!4d-73.1187654`;
+    const otro = `https://www.google.com/maps/place/Otro/@5.7045,-72.9337,17z/data=!3d5.7057345!4d-72.9324654`;
     const nueva = await call(`/v1/rides/${id}/address`, 'PATCH', { text: 'Otro sitio', link: otro });
     assert(nueva.status < 400, 'una ubicación nueva por enlace se acepta', nueva.body);
-    assert(nueva.body.pickupLat === 5.7712345 && nueva.body.pickupLng === -73.1187654, 'el punto pasa al del enlace nuevo', [nueva.body.pickupLat, nueva.body.pickupLng]);
+    assert(nueva.body.pickupLat === 5.7057345 && nueva.body.pickupLng === -72.9324654, 'el punto pasa al del enlace nuevo', [nueva.body.pickupLat, nueva.body.pickupLng]);
     assert(nueva.body.pickupLink === otro, 'y el enlace viejo se reemplaza', nueva.body.pickupLink);
 
     // Una carrera que no se pudo ubicar y a la que el cliente le comparte la
@@ -113,12 +113,12 @@ async function main(): Promise<void> {
     creadas.push(sinUbicar.body.id as string);
     assert(sinUbicar.body.pickupSource === 'sin_ubicar', 'una dirección que no se ubica queda sin ubicar', sinUbicar.body.pickupSource);
     const compartida = await call(`/v1/rides/${sinUbicar.body.id as string}/address`, 'PATCH', {
-      text: 'Vereda El Rosal, Paipa',
-      point: { lat: 5.7651234, lng: -73.1301234 },
-      link: 'https://www.google.com/maps?q=5.7651234,-73.1301234',
+      text: 'Vereda Monquirá, Sogamoso',
+      point: { lat: 5.6996234, lng: -72.9438234 },
+      link: 'https://www.google.com/maps?q=5.6996234,-72.9438234',
     });
     assert(compartida.body.pickupSource === 'compartida', 'al compartir la ubicación después pasa a compartida', compartida.body.pickupSource);
-    assert(compartida.body.pickupLink === 'https://www.google.com/maps?q=5.7651234,-73.1301234', 'con su enlace', compartida.body.pickupLink);
+    assert(compartida.body.pickupLink === 'https://www.google.com/maps?q=5.6996234,-72.9438234', 'con su enlace', compartida.body.pickupLink);
 
     console.log('\n4. Cambiar a efectivo y relanzar en una sola llamada');
     const tres = await call('/v1/rides', 'POST', {

@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
+import { CENTRO } from './coordenadas';
 
 /**
  * Prueba de extremo a extremo del despacho, contra la API en marcha.
@@ -26,7 +27,6 @@ const DRIVERS = [
 ];
 
 const PIN = '4821';
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 
 interface Json {
   [key: string]: unknown;
@@ -143,7 +143,7 @@ async function main(): Promise<void> {
       customerPhone: `+5731${Math.floor(10_000_000 + Math.random() * 89_999_999)}`,
       customerName: 'Prueba de concurrencia',
       pickup: { text: 'Carrera 21 # 24-18', reference: 'Frente a la plaza', point: CENTRO },
-      dropoff: { text: 'Terminal de transportes', point: { lat: 5.7836, lng: -73.1177 } },
+      dropoff: { text: 'Terminal de transportes', point: { lat: 5.7181, lng: -72.9314 } },
       vehicleType: 'sedan',
       passengers: 1,
     },

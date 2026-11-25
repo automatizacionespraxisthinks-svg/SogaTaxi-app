@@ -140,8 +140,8 @@ async function main(): Promise<void> {
       select
         gen_random_uuid(),
         ${driver!.id}::uuid,
-        5.78 + random() / 100,
-        -73.11 + random() / 100,
+        5.71 + random() / 100,
+        -72.92 + random() / 100,
         -- Repartidas entre hace 7 meses y hace 6 meses y pico: todas caducadas.
         now() - make_interval(days => 185) - make_interval(secs => s * 10)
       from generate_series(1, ${FILAS}) as s

@@ -150,11 +150,11 @@ describe('altas', () => {
   });
 
   it('el URI lleva emisor y cuenta, que es lo que muestra el teléfono', () => {
-    const uri = otpauthUri('ana@taxturistico.local', 'JBSWY3DPEHPK3PXP');
+    const uri = otpauthUri('ana@sogataxi.local', 'JBSWY3DPEHPK3PXP');
     expect(uri).toMatch(/^otpauth:\/\/totp\//);
 
     const parsed = new URL(uri);
-    expect(decodeURIComponent(parsed.pathname)).toBe('/SogaTaxi:ana@taxturistico.local');
+    expect(decodeURIComponent(parsed.pathname)).toBe('/SogaTaxi:ana@sogataxi.local');
     expect(parsed.searchParams.get('secret')).toBe('JBSWY3DPEHPK3PXP');
     expect(parsed.searchParams.get('issuer')).toBe('SogaTaxi');
     expect(parsed.searchParams.get('algorithm')).toBe('SHA1');

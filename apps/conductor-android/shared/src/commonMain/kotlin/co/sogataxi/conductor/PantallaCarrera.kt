@@ -1,6 +1,5 @@
 package co.sogataxi.conductor
 
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -38,9 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -77,7 +74,6 @@ private val MOTIVOS = listOf(
 
 @Composable
 fun PantallaCarrera(sesion: EstadoSesion) {
-    val contexto = LocalContext.current
     val carrera = sesion.carrera ?: return
     val estado = sesion.estadoCarrera
     var cancelando by remember { mutableStateOf(false) }
@@ -115,15 +111,15 @@ fun PantallaCarrera(sesion: EstadoSesion) {
 
             if (estado == EstadoCarrera.ASSIGNED && carrera.tienePunto) {
                 sesion.metrosALaRecogida?.let { metros ->
-                    val texto = if (metros <= sesion.radioLlegada) "Estás en el lugar" else if (metros < 1000) "A $metros m" else "A ${"%.1f".format(metros / 1000.0)} km"
+                    val texto = if (metros <= sesion.radioLlegada) "Estás en el lugar" else if (metros < 1000) "A $metros m" else "A ${unDecimal(metros / 1000.0)} km"
                     Text(texto, color = Marca.tinta, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
             if (estado != EstadoCarrera.IN_PROGRESS) {
                 Mapas.enlaces(carrera)?.let { enlaces ->
-                    BotonDeMapa("Ir con Maps", Color.White, Color(0xFF202124)) { Mapas.abrir(contexto, enlaces.maps) }
-                    BotonDeMapa("Ir con Waze", Color(0xFF33CCFF), Color(0xFF0B1B26)) { Mapas.abrir(contexto, enlaces.waze) }
+                    BotonDeMapa("Ir con Maps", Color.White, Color(0xFF202124)) { plataforma.abrirEnlace(enlaces.maps) }
+                    BotonDeMapa("Ir con Waze", Color(0xFF33CCFF), Color(0xFF0B1B26)) { plataforma.abrirEnlace(enlaces.waze) }
                 }
             }
 
@@ -138,7 +134,7 @@ fun PantallaCarrera(sesion: EstadoSesion) {
                     }
                     carrera.telefono?.let { tel ->
                         Button(
-                            onClick = { Mapas.llamar(contexto, tel) },
+                            onClick = { plataforma.llamar(tel) },
                             colors = ButtonDefaults.buttonColors(containerColor = Marca.verdeRelleno, contentColor = Color.White),
                             modifier = Modifier.height(52.dp),
                         ) { Text("Llamar", fontWeight = FontWeight.Bold, fontSize = 17.sp) }
@@ -208,10 +204,10 @@ private fun BotonDeEtapa(sesion: EstadoSesion, carrera: Carrera) {
         Etapa.FINALIZAR -> Marca.verde
     }
 
-    var ahora by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var ahora by remember { mutableLongStateOf(ahoraMs()) }
     LaunchedEffect(estado) {
         while (estado == EstadoCarrera.IN_PROGRESS) {
-            ahora = System.currentTimeMillis()
+            ahora = ahoraMs()
             delay(1_000)
         }
     }
@@ -231,7 +227,7 @@ private fun BotonDeEtapa(sesion: EstadoSesion, carrera: Carrera) {
             onClick = {},
             enabled = false,
             modifier = Modifier.fillMaxWidth().height(72.dp),
-        ) { Text("Finalizar en ${s / 60}:${"%02d".format(s % 60)}", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
+        ) { Text("Finalizar en ${s / 60}:${dosDigitos(s % 60)}", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
     } else {
         Button(
             onClick = { Sesion.etapa(siguiente) },
@@ -249,7 +245,7 @@ private fun FotoDelLugar(rideId: String, version: String) {
     LaunchedEffect(rideId, version) {
         imagen = runCatching {
             val bytes = Api.bytes("/v1/driver/rides/$rideId/photo")
-            withContext(Dispatchers.Default) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }
+            withContext(Dispatchers.Default) { decodificarImagen(bytes) }
         }.getOrNull()
     }
     val foto = imagen ?: return

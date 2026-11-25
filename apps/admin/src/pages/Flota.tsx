@@ -7,7 +7,7 @@ import {
   DRIVER_STATUS_LABEL,
   DRIVER_STATUS_TONE,
   VEHICLE_TYPE_LABEL,
-  ZONA_HORARIA_PAIPA,
+  ZONA_HORARIA_LOCAL,
   finDeSuspension,
   formatDistance,
   formatRelative,
@@ -321,7 +321,7 @@ function Desactivado() {
  * tarjeta va solo el día; la hora exacta, en el título y en la ficha.
  */
 function Suspendido({ hasta }: { hasta: string }) {
-  const dia = new Date(hasta).toLocaleDateString('es-CO', { day: 'numeric', month: 'short', timeZone: ZONA_HORARIA_PAIPA });
+  const dia = new Date(hasta).toLocaleDateString('es-CO', { day: 'numeric', month: 'short', timeZone: ZONA_HORARIA_LOCAL });
   return (
     <span
       title={`Suspendido hasta el ${finDeSuspension(hasta)}`}

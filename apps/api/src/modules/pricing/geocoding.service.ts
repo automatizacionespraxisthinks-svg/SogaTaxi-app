@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import type Redis from 'ioredis';
-import { ZONA_HORARIA_PAIPA, type Point } from '@tax/shared';
+import { ZONA_HORARIA_LOCAL, type Point } from '@tax/shared';
 import { REDIS, redisKeys } from '../../redis/redis.module';
 import { loadEnv } from '../../config/env';
 import { ZonesService } from './zones.service';
@@ -110,8 +110,8 @@ const CAMPOS_DE_USO: CampoDeUso[] = [
  */
 const DIRECCION_DE_PRUEBA = 'Carrera 22 # 25-14';
 
-const diaEnPaipa = (fecha = new Date()) =>
-  new Intl.DateTimeFormat('en-CA', { timeZone: ZONA_HORARIA_PAIPA }).format(fecha);
+const diaLocal = (fecha = new Date()) =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: ZONA_HORARIA_LOCAL }).format(fecha);
 
 type Respuesta = { resuelta: DireccionResuelta | null; motivo: MotivoGeocodificacion; detalle?: string };
 
@@ -195,8 +195,8 @@ export class GeocodingService implements OnModuleInit {
    */
   async estado(): Promise<EstadoGeocodificador> {
     const base = { ...this.actual, ultimaPrueba: this.ultimaPrueba };
-    const hoy = diaEnPaipa();
-    const dias = Array.from({ length: 31 }, (_, i) => diaEnPaipa(new Date(Date.now() - i * 86_400_000)));
+    const hoy = diaLocal();
+    const dias = Array.from({ length: 31 }, (_, i) => diaLocal(new Date(Date.now() - i * 86_400_000)));
 
     let usos: UsoDelDia[];
     try {
@@ -537,7 +537,7 @@ export class GeocodingService implements OnModuleInit {
     return { resuelta: null, motivo, detalle };
   }
 
-  private static ceros(dia = diaEnPaipa()): UsoDelDia {
+  private static ceros(dia = diaLocal()): UsoDelDia {
     const uso = { dia } as UsoDelDia;
     for (const campo of CAMPOS_DE_USO) uso[campo] = 0;
     return uso;
@@ -550,7 +550,7 @@ export class GeocodingService implements OnModuleInit {
   }
 
   private contadores(): UsoDelDia {
-    if (this.hoy.dia !== diaEnPaipa()) this.hoy = GeocodingService.ceros();
+    if (this.hoy.dia !== diaLocal()) this.hoy = GeocodingService.ceros();
     return { ...this.hoy };
   }
 

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { CENTRO } from './coordenadas';
 
 /**
  * La pausa del turno, de extremo a extremo.
@@ -28,7 +29,6 @@ const APARTADOS = [
 ];
 
 const PIN = '4821';
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 
 interface Json {
   [key: string]: unknown;
@@ -86,7 +86,7 @@ async function carreraYOfertas(etiqueta: string): Promise<{ rideId: string; ofer
       customerPhone: `+5731${Math.floor(10_000_000 + Math.random() * 89_999_999)}`,
       customerName: etiqueta,
       pickup: { text: 'Carrera 21 # 24-18', reference: 'Frente a la plaza', point: CENTRO },
-      dropoff: { text: 'Terminal de transportes', point: { lat: 5.7836, lng: -73.1177 } },
+      dropoff: { text: 'Terminal de transportes', point: { lat: 5.7181, lng: -72.9314 } },
       vehicleType: 'sedan',
       passengers: 1,
     },

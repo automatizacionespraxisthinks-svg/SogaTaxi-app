@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ZONA_HORARIA_PAIPA } from './informes';
+import { ZONA_HORARIA_LOCAL } from './informes';
 
 /**
  * Suspensión de un conductor por el reglamento interno.
@@ -30,7 +30,7 @@ export function sigueSuspendido(hasta: Date | string | null | undefined, ahora =
 /** «viernes 31 de octubre, 3:00 p. m.», en hora de Paipa. */
 export function finDeSuspension(hasta: Date | string): string {
   return new Intl.DateTimeFormat('es-CO', {
-    timeZone: ZONA_HORARIA_PAIPA,
+    timeZone: ZONA_HORARIA_LOCAL,
     weekday: 'long',
     day: 'numeric',
     month: 'long',

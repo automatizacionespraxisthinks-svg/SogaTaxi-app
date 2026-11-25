@@ -3,7 +3,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
 import { and, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
-import { DB, type Database } from '../../db/db.module';
+import { DB, type Database, type Tx } from '../../db/db.module';
 import { AuditService } from '../audit/audit.service';
 import { driverShifts, drivers, rideDriverCancellations, rideOffers, rideStatusHistory, rides, vehicles } from '../../db/schema';
 import { AppError } from '../../common/problem';
@@ -15,6 +15,8 @@ import { RidesService, type Actor } from '../rides/rides.service';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { PushService, type EstadoAviso } from '../push/push.service';
 import { loadEnv } from '../../config/env';
+import { REDIS, redisKeys } from '../../redis/redis.module';
+import type { Redis } from 'ioredis';
 import { OLEADA_A_TODOS, finDeSuspension, sigueSuspendido, type Oleada, type WaveLogEntry } from '@tax/shared';
 
 export const DISPATCH_QUEUE = 'dispatch';
@@ -75,6 +77,21 @@ const MARGEN_OFERTA_MS = 5_000;
  * La pieza crítica es `accept`: la exclusividad la decide la base de datos en
  * una sola sentencia, nunca la aplicación comparando en memoria.
  */
+/**
+ * El índice parcial `one_active_ride_per_driver` es el respaldo estructural de
+ * §5.1: si el conductor ya tiene una carrera activa —una que se quedó colgada
+ * tras una caída, por ejemplo—, la base rechaza la asignación aunque la
+ * sentencia condicional sí hubiera encontrado esta carrera en Notificada.
+ * Sin esta traducción, el conductor recibe un 500 opaco en mitad de la calle
+ * en vez de saber que debe cerrar la carrera anterior.
+ */
+function traducirConductorOcupado(error: unknown): never {
+  if (isUniqueViolation(error, 'one_active_ride_per_driver')) {
+    throw new AppError('DRIVER_BUSY', 'Ya tienes una carrera activa. Termínala o llama a la oficina.');
+  }
+  throw error;
+}
+
 @Injectable()
 export class DispatchService {
   private readonly logger = new Logger(DispatchService.name);
@@ -91,6 +108,7 @@ export class DispatchService {
     private readonly push: PushService,
     @Inject(forwardRef(() => RidesService))
     private readonly ridesService: RidesService,
+    @Inject(REDIS) private readonly redis: Redis,
   ) {}
 
   /* ----------------------------------------------------------- oleadas */
@@ -227,7 +245,9 @@ export class DispatchService {
         candidates: 0,
         ...(sinGps !== undefined ? { sinGps } : {}),
       });
-      await this.escalate(rideId, wave);
+      // Directo, sin el cerrojo de `escalate`: o es la oleada 1 de un
+      // intento nuevo, o ya se está dentro del paso que lo tomó.
+      await this.escalarReservado(rideId, wave);
       return;
     }
 
@@ -298,13 +318,40 @@ export class DispatchService {
 
     // La primera oleada es la que mueve la carrera a Notificada; las
     // siguientes solo cambian el número de oleada.
+    const retirarLasNuevas = async () => {
+      if (candidates.length === 0) return;
+      await this.db
+        .update(rideOffers)
+        .set({ response: 'revoked', revokedAt: new Date() })
+        .where(and(inArray(rideOffers.id, [...idOferta.values()]), eq(rideOffers.response, 'pending')));
+    };
     if (ride.status !== 'NOTIFIED') {
-      await this.ridesService.transition(rideId, 'NOTIFIED', SYSTEM, {
-        note: `Oleada ${wave}`,
-        patch: { wave },
-      });
+      try {
+        await this.ridesService.transition(rideId, 'NOTIFIED', SYSTEM, {
+          note: `Oleada ${wave}`,
+          patch: { wave },
+        });
+      } catch (error) {
+        // La cancelaron o la asignaron a mano mientras salía la oleada.
+        await retirarLasNuevas();
+        throw error;
+      }
     } else {
-      await this.db.update(rides).set({ wave }).where(eq(rides.id, rideId));
+      /*
+       * Solo si sigue Notificada (25/11/2026). Entre leer la carrera arriba y
+       * llegar aquí, alguien pudo aceptarla: entonces las ofertas recién
+       * creadas sobran, se retiran y no se avisa a nadie.
+       */
+      const sigue = await this.db
+        .update(rides)
+        .set({ wave })
+        .where(and(eq(rides.id, rideId), eq(rides.status, 'NOTIFIED')))
+        .returning({ id: rides.id });
+      if (sigue.length === 0) {
+        await retirarLasNuevas();
+        this.logger.log({ rideId, wave }, 'La carrera se asignó mientras se lanzaba la oleada');
+        return;
+      }
     }
 
     await this.registrarOleada(rideId, {
@@ -527,6 +574,9 @@ export class DispatchService {
    * temporizador se perdió, bloqueaba al cliente indefinidamente.
    */
   async expireStaleUnassigned(): Promise<number> {
+    await this.rescatarNotificadasColgadas().catch((error: unknown) =>
+      this.logger.warn({ err: error }, 'Falló el rescate de carreras notificadas'),
+    );
     // Nunca antes de que le toque al relanzamiento automático, aunque la
     // configuración ponga una espera más larga que la caducidad.
     const segundos = Math.max(
@@ -610,7 +660,83 @@ export class DispatchService {
     await this.escalate(rideId, wave);
   }
 
+  /**
+   * Pasa de la oleada `wave` a la siguiente, o la da por agotada. Una sola
+   * vez por oleada e intento (25/11/2026): al vencer la oleada y con el
+   * último rechazo a la vez, las dos llamadas escalaban. La segunda chocaba
+   * con el índice único de ofertas o con INVALID_TRANSITION, y ese error le
+   * llegaba al conductor que acababa de rechazar.
+   *
+   * Son dos piezas:
+   *  - un cerrojo en Redis mientras dura el paso, para que dos llamadas no
+   *    corran a la vez. Se suelta siempre al terminar y caduca solo en 30 s:
+   *    si la API muere a mitad, el reintento del temporizador (BullMQ) o el
+   *    barrido de cada minuto encuentran el camino libre. Con una reserva
+   *    larga, ese reintento se la encontraba tomada y la carrera se quedaba
+   *    «Notificada» para siempre;
+   *  - con el cerrojo ya tomado, se vuelve a mirar la carrera: si la oleada
+   *    ya avanzó o la carrera dejó de buscar conductor, quien llega tarde no
+   *    hace nada.
+   */
   private async escalate(rideId: string, wave: Oleada): Promise<void> {
+    const clave = redisKeys.escalada(rideId);
+    const gano = await this.redis.set(clave, '1', 'EX', 30, 'NX');
+    if (gano !== 'OK') {
+      this.logger.debug({ rideId, wave }, 'Otra llamada está escalando esta carrera');
+      return;
+    }
+    try {
+      const ride = await this.ridesService.byId(rideId);
+      if (ride.status !== 'NOTIFIED' || ride.wave !== wave) {
+        this.logger.debug(
+          { rideId, wave, status: ride.status, actual: ride.wave },
+          'La oleada ya quedó atrás: no se escala',
+        );
+        return;
+      }
+      await this.escalarReservado(rideId, wave);
+    } finally {
+      await this.redis.del(clave).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Red de seguridad (25/11/2026): una carrera «Notificada» sin ninguna
+   * oferta viva y quieta hace rato perdió su temporizador (reinicio de la
+   * API, cola caída, un fallo a mitad de una oleada). Se escala desde donde
+   * quedó. Nadie más la miraba: `expireStaleUnassigned` solo ve las «Sin
+   * asignar».
+   */
+  async rescatarNotificadasColgadas(): Promise<number> {
+    const limite = new Date(Date.now() - 3 * 60_000);
+    const colgadas = await this.db.execute<{ id: string; wave: number | null }>(sql`
+      select r.id, r.wave
+        from rides r
+       where r.status = 'NOTIFIED'
+         and r.updated_at < ${limite}
+         and not exists (
+           select 1 from ride_offers o
+            where o.ride_id = r.id
+              and o.response = 'pending'
+              and o.revoked_at is null
+              and o.expires_at > now()
+         )
+       limit 50
+    `);
+    let rescatadas = 0;
+    for (const { id, wave } of colgadas.rows) {
+      try {
+        await this.escalate(id, (wave ?? 1) as Oleada);
+        rescatadas += 1;
+      } catch (error) {
+        this.logger.warn({ err: error, rideId: id }, 'No se pudo rescatar una carrera notificada sin ofertas');
+      }
+    }
+    if (rescatadas) this.logger.warn({ rescatadas }, 'Carreras notificadas sin ofertas vivas: se escalaron');
+    return rescatadas;
+  }
+
+  private async escalarReservado(rideId: string, wave: Oleada): Promise<void> {
     if (wave < 3) {
       await this.startWave(rideId, (wave + 1) as 2 | 3);
       return;
@@ -832,200 +958,22 @@ export class DispatchService {
     const eventIds: string[] = [];
     const revokedDrivers: string[] = [];
 
-    await this.db
-      .transaction(async (tx) => {
-        const result = await tx.execute<{ id: string; code: string; version: number; pago_electronico: boolean }>(sql`
-          update rides
-             set status = 'ASSIGNED',
-                 driver_id = ${driverId},
-                 -- El taxi con el que va: el del turno abierto. Sin esto la
-                 -- carrera no sabía qué placa la llevó.
-                 vehicle_id = (
-                   select s.vehicle_id from driver_shifts s
-                    where s.driver_id = ${driverId} and s.ended_at is null
-                    limit 1
-                 ),
-                 assigned_at = now(),
-                 version = version + 1,
-                 updated_at = now()
-           where id = ${rideId}
-             and status = 'NOTIFIED'
-             and exists (
-               select 1 from ride_offers o
-                where o.ride_id = ${rideId}
-                  and o.driver_id = ${driverId}
-                  and o.expires_at > now()
-                  and o.revoked_at is null
-                  and o.response = 'pending'
-             )
-             -- Sin turno abierto no se toma carrera (17/11/2026): antes un
-             -- conductor que había cerrado turno aceptaba igual una oferta
-             -- que le quedó en pantalla, y la carrera salía sin taxi.
-             and exists (
-               select 1 from driver_shifts s
-                where s.driver_id = ${driverId} and s.ended_at is null
-             )
-          returning id, code, version, pago_electronico
-        `);
+    const resultado = await this.db
+      .transaction((tx) => this.aceptarEnTx(tx, rideId, driverId, actor, eventIds, revokedDrivers))
+      .catch(traducirConductorOcupado);
 
-        const row = result.rows[0];
-        if (!row) {
-          // Sin fila de vuelta hay dos causas posibles, y al conductor le
-          // importa la diferencia: o alguien se adelantó, o su oferta venció.
-          const [ride] = await tx
-            .select({ status: rides.status })
-            .from(rides)
-            .where(eq(rides.id, rideId))
-            .limit(1);
+    if (resultado === 'ya_era_suya') return this.ridesService.byId(rideId);
+    return this.trasAceptar(rideId, driverId, actor, eventIds, revokedDrivers);
+  }
 
-          if (!ride) throw new AppError('NOT_FOUND', `No existe la carrera ${rideId}`);
-          if (ride.status !== 'NOTIFIED') {
-            throw new AppError('RIDE_ALREADY_TAKEN', 'Otro conductor aceptó la carrera primero');
-          }
-          const [turno] = await tx
-            .select({ id: driverShifts.id })
-            .from(driverShifts)
-            .where(and(eq(driverShifts.driverId, driverId), isNull(driverShifts.endedAt)))
-            .limit(1);
-          if (!turno) {
-            throw new AppError('DRIVER_BUSY', 'No tienes turno abierto: abre el turno para tomar carreras.');
-          }
-          throw new AppError('OFFER_NOT_VALID', 'La oferta venció o fue revocada');
-        }
-
-        // En la misma transacción: el conductor pasa a En carrera, las demás
-        // ofertas se revocan y el evento entra al outbox (§5.1).
-        await tx.update(drivers).set({ status: 'ON_RIDE' }).where(eq(drivers.id, driverId));
-
-        /*
-         * El historial también va aquí dentro.
-         *
-         * La aceptación no pasa por `RidesService.transition` —necesita la
-         * sentencia atómica—, así que si no se escribe a mano, la bitácora
-         * salta de «Notificada» a «Conductor en el sitio» y el momento de la
-         * asignación desaparece. Es la fila que sostiene RF-44 (tiempo hasta
-         * la asignación) y la que explica quién tomó la carrera.
-         */
-        const driver = await tx
-          .select({
-            name: drivers.name,
-            code: drivers.code,
-            plate: vehicles.plate,
-            vehicleType: vehicles.type,
-            movil: vehicles.internalNumber,
-          })
-          .from(drivers)
-          .leftJoin(rides, eq(rides.id, rideId))
-          .leftJoin(vehicles, eq(vehicles.id, rides.vehicleId))
-          .where(eq(drivers.id, driverId))
-          .limit(1);
-
-        await tx.insert(rideStatusHistory).values({
-          id: uuidv7(),
-          rideId,
-          fromStatus: 'NOTIFIED',
-          toStatus: 'ASSIGNED',
-          actor: actor.kind,
-          actorName: driver[0]?.name ?? actor.name,
-          actorId: driverId,
-          note: actor.kind === 'operator' ? 'Asignación manual' : undefined,
-        });
-
-        await this.audit.record(
-          {
-            actorId: actor.id,
-            actorName: actor.name,
-            role: actor.role ?? actor.kind,
-            action: 'Aceptó la carrera',
-            entity: 'rides',
-            entityId: row.code,
-            before: { status: 'NOTIFIED' },
-            after: { status: 'ASSIGNED', driverId, version: row.version },
-            ip: actor.ip,
-          },
-          tx as unknown as Database,
-        );
-
-        await tx
-          .update(rideOffers)
-          .set({ response: 'accepted', respondedAt: new Date() })
-          .where(and(eq(rideOffers.rideId, rideId), eq(rideOffers.driverId, driverId)));
-
-        // Se anota a quién se le retira para poder quitarle también el aviso
-        // del teléfono: si no, le quedaría en pantalla una carrera que ya no
-        // puede tomar.
-        const revoked = await tx
-          .update(rideOffers)
-          .set({ response: 'revoked', revokedAt: new Date() })
-          .where(
-            and(
-              eq(rideOffers.rideId, rideId),
-              eq(rideOffers.response, 'pending'),
-              isNull(rideOffers.revokedAt),
-            ),
-          )
-          .returning({ driverId: rideOffers.driverId });
-
-        revokedDrivers.push(...revoked.map((row) => row.driverId));
-
-        /*
-         * Si otro conductor la había soltado por fuerza mayor, para el cliente
-         * es un taxi nuevo: «Le asignamos otro taxi» (21/11/2026).
-         */
-        const [soltada] = await tx
-          .select({ n: sql<number>`count(*)::int` })
-          .from(rideDriverCancellations)
-          .where(eq(rideDriverCancellations.rideId, rideId));
-        eventIds.push(
-          await this.outbox.enqueue(tx, {
-            type: (soltada?.n ?? 0) > 0 ? 'ride.reassigned' : 'ride.assigned',
-            rideId,
-            rideCode: row.code,
-            rideVersion: row.version,
-            /*
-             * Lo que el cliente necesita para reconocer el taxi: quién va, su
-             * código interno y la placa. n8n lo usa para el aviso de
-             * «ya va en camino» sin tener que pedir el detalle de la carrera.
-             */
-            payload: {
-              code: row.code,
-              driverId,
-              pagoElectronico: row.pago_electronico,
-              driver: {
-                id: driverId,
-                code: driver[0]?.code ?? null,
-                name: driver[0]?.name ?? null,
-                plate: driver[0]?.plate ?? null,
-                vehicleType: driver[0]?.vehicleType ?? null,
-                // El número del móvil en la empresa («002»), si el taxi lo tiene.
-                movil: driver[0]?.movil ?? null,
-              },
-            },
-          }),
-        );
-
-        return row;
-      })
-      .catch((error: unknown) => {
-        /*
-         * El índice parcial `one_active_ride_per_driver` es el respaldo
-         * estructural de §5.1: si el conductor ya tiene una carrera activa
-         * —una que se quedó colgada tras una caída, por ejemplo—, la base
-         * rechaza la asignación aunque la sentencia condicional sí hubiera
-         * encontrado esta carrera en Notificada.
-         *
-         * Sin esta traducción, el conductor recibe un 500 opaco en mitad de
-         * la calle en vez de saber que debe cerrar la carrera anterior.
-         */
-        if (isUniqueViolation(error, 'one_active_ride_per_driver')) {
-          throw new AppError(
-            'DRIVER_BUSY',
-            'Ya tienes una carrera activa. Termínala o llama a la oficina.',
-          );
-        }
-        throw error;
-      });
-
+  /** Lo que se hace al confirmar la asignación: avisos y pantallas. */
+  private async trasAceptar(
+    rideId: string,
+    driverId: string,
+    actor: Actor,
+    eventIds: string[],
+    revokedDrivers: string[],
+  ) {
     await this.outbox.notify(eventIds);
 
     // Tras el commit, el socket retira la oferta de las otras pantallas en
@@ -1040,6 +988,213 @@ export class DispatchService {
 
     this.logger.log({ rideId, driverId, actor: actor.name }, 'Carrera asignada');
     return ride;
+  }
+
+  /**
+   * La aceptación atómica, dentro de la transacción de quien llama: la de
+   * `accept` o la de `assignManually`, que así crea la oferta y la acepta en
+   * un solo commit.
+   *
+   * Devuelve `ya_era_suya` si la carrera ya está asignada a este mismo
+   * conductor: un reintento tras una caída de red no es «otro aceptó».
+   */
+  private async aceptarEnTx(
+    tx: Tx,
+    rideId: string,
+    driverId: string,
+    actor: Actor,
+    eventIds: string[],
+    revokedDrivers: string[],
+  ): Promise<'aceptada' | 'ya_era_suya'> {
+    const result = await tx.execute<{ id: string; code: string; version: number; pago_electronico: boolean }>(sql`
+      update rides
+         set status = 'ASSIGNED',
+             driver_id = ${driverId},
+             -- El taxi con el que va: el del turno abierto. Sin esto la
+             -- carrera no sabía qué placa la llevó.
+             vehicle_id = (
+               select s.vehicle_id from driver_shifts s
+                where s.driver_id = ${driverId} and s.ended_at is null
+                limit 1
+             ),
+             assigned_at = now(),
+             version = version + 1,
+             updated_at = now()
+       where id = ${rideId}
+         and status = 'NOTIFIED'
+         and exists (
+           select 1 from ride_offers o
+            where o.ride_id = ${rideId}
+              and o.driver_id = ${driverId}
+              and o.expires_at > now()
+              and o.revoked_at is null
+              and o.response = 'pending'
+         )
+         -- Sin turno abierto no se toma carrera (17/11/2026): antes un
+         -- conductor que había cerrado turno aceptaba igual una oferta
+         -- que le quedó en pantalla, y la carrera salía sin taxi.
+         and exists (
+           select 1 from driver_shifts s
+            where s.driver_id = ${driverId} and s.ended_at is null
+         )
+         -- En pausa no se toma carrera (25/11/2026), aunque le quedara una
+         -- oferta en pantalla.
+         and not exists (
+           select 1 from drivers d where d.id = ${driverId} and d.status = 'PAUSED'
+         )
+      returning id, code, version, pago_electronico
+    `);
+
+    const row = result.rows[0];
+    if (!row) {
+      // Sin fila de vuelta hay dos causas posibles, y al conductor le
+      // importa la diferencia: o alguien se adelantó, o su oferta venció.
+      const [ride] = await tx
+        .select({ status: rides.status, driverId: rides.driverId })
+        .from(rides)
+        .where(eq(rides.id, rideId))
+        .limit(1);
+
+      if (!ride) throw new AppError('NOT_FOUND', `No existe la carrera ${rideId}`);
+      // El mismo conductor repitió «Aceptar» porque no le llegó la respuesta
+      // (señal mala): ya es suya, no «otro aceptó primero».
+      if (ride.driverId === driverId && ['ASSIGNED', 'DRIVER_ARRIVED', 'IN_PROGRESS'].includes(ride.status)) {
+        return 'ya_era_suya';
+      }
+      if (ride.status !== 'NOTIFIED') {
+        throw new AppError('RIDE_ALREADY_TAKEN', 'Otro conductor aceptó la carrera primero');
+      }
+      const [turno] = await tx
+        .select({ id: driverShifts.id })
+        .from(driverShifts)
+        .where(and(eq(driverShifts.driverId, driverId), isNull(driverShifts.endedAt)))
+        .limit(1);
+      if (!turno) {
+        throw new AppError('DRIVER_BUSY', 'No tienes turno abierto: abre el turno para tomar carreras.');
+      }
+      const [yo] = await tx
+        .select({ status: drivers.status })
+        .from(drivers)
+        .where(eq(drivers.id, driverId))
+        .limit(1);
+      if (yo?.status === 'PAUSED') {
+        throw new AppError('DRIVER_BUSY', 'Estás en pausa: vuelve a estar disponible para tomar carreras.');
+      }
+      throw new AppError('OFFER_NOT_VALID', 'La oferta venció o fue revocada');
+    }
+
+    // En la misma transacción: el conductor pasa a En carrera, las demás
+    // ofertas se revocan y el evento entra al outbox (§5.1).
+    await tx.update(drivers).set({ status: 'ON_RIDE' }).where(eq(drivers.id, driverId));
+
+    /*
+     * El historial también va aquí dentro.
+     *
+     * La aceptación no pasa por `RidesService.transition` —necesita la
+     * sentencia atómica—, así que si no se escribe a mano, la bitácora
+     * salta de «Notificada» a «Conductor en el sitio» y el momento de la
+     * asignación desaparece. Es la fila que sostiene RF-44 (tiempo hasta
+     * la asignación) y la que explica quién tomó la carrera.
+     */
+    const driver = await tx
+      .select({
+        name: drivers.name,
+        code: drivers.code,
+        plate: vehicles.plate,
+        vehicleType: vehicles.type,
+        movil: vehicles.internalNumber,
+      })
+      .from(drivers)
+      .leftJoin(rides, eq(rides.id, rideId))
+      .leftJoin(vehicles, eq(vehicles.id, rides.vehicleId))
+      .where(eq(drivers.id, driverId))
+      .limit(1);
+
+    await tx.insert(rideStatusHistory).values({
+      id: uuidv7(),
+      rideId,
+      fromStatus: 'NOTIFIED',
+      toStatus: 'ASSIGNED',
+      actor: actor.kind,
+      actorName: driver[0]?.name ?? actor.name,
+      actorId: driverId,
+      note: actor.kind === 'operator' ? 'Asignación manual' : undefined,
+    });
+
+    await this.audit.record(
+      {
+        actorId: actor.id,
+        actorName: actor.name,
+        role: actor.role ?? actor.kind,
+        action: 'Aceptó la carrera',
+        entity: 'rides',
+        entityId: row.code,
+        before: { status: 'NOTIFIED' },
+        after: { status: 'ASSIGNED', driverId, version: row.version },
+        ip: actor.ip,
+      },
+      tx as unknown as Database,
+    );
+
+    await tx
+      .update(rideOffers)
+      .set({ response: 'accepted', respondedAt: new Date() })
+      .where(and(eq(rideOffers.rideId, rideId), eq(rideOffers.driverId, driverId)));
+
+    // Se anota a quién se le retira para poder quitarle también el aviso
+    // del teléfono: si no, le quedaría en pantalla una carrera que ya no
+    // puede tomar.
+    const revoked = await tx
+      .update(rideOffers)
+      .set({ response: 'revoked', revokedAt: new Date() })
+      .where(
+        and(
+          eq(rideOffers.rideId, rideId),
+          eq(rideOffers.response, 'pending'),
+          isNull(rideOffers.revokedAt),
+        ),
+      )
+      .returning({ driverId: rideOffers.driverId });
+
+    revokedDrivers.push(...revoked.map((row) => row.driverId));
+
+    /*
+     * Si otro conductor la había soltado por fuerza mayor, para el cliente
+     * es un taxi nuevo: «Le asignamos otro taxi» (21/11/2026).
+     */
+    const [soltada] = await tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(rideDriverCancellations)
+      .where(eq(rideDriverCancellations.rideId, rideId));
+    eventIds.push(
+      await this.outbox.enqueue(tx, {
+        type: (soltada?.n ?? 0) > 0 ? 'ride.reassigned' : 'ride.assigned',
+        rideId,
+        rideCode: row.code,
+        rideVersion: row.version,
+        /*
+         * Lo que el cliente necesita para reconocer el taxi: quién va, su
+         * código interno y la placa. n8n lo usa para el aviso de
+         * «ya va en camino» sin tener que pedir el detalle de la carrera.
+         */
+        payload: {
+          code: row.code,
+          driverId,
+          pagoElectronico: row.pago_electronico,
+          driver: {
+            id: driverId,
+            code: driver[0]?.code ?? null,
+            name: driver[0]?.name ?? null,
+            plate: driver[0]?.plate ?? null,
+            vehicleType: driver[0]?.vehicleType ?? null,
+            // El número del móvil en la empresa («002»), si el taxi lo tiene.
+            movil: driver[0]?.movil ?? null,
+          },
+        },
+      }),
+    );
+
+    return 'aceptada';
   }
 
   /** Rechazo explícito: no espera al vencimiento para seguir buscando. */
@@ -1070,7 +1225,12 @@ export class DispatchService {
     // Si era el último que la tenía —de esta oleada o de las anteriores, que
     // siguen dentro—, se pasa a la siguiente ya.
     if ((pending?.count ?? 0) === 0 && ride.status === 'NOTIFIED') {
-      await this.escalate(rideId, (ride.wave ?? 1) as Oleada);
+      // El rechazo ya quedó guardado: si escalar falla, es problema del
+      // despacho (el temporizador de la oleada lo reintenta), no del
+      // conductor, que no tiene que ver un error por haber dicho que no.
+      await this.escalate(rideId, (ride.wave ?? 1) as Oleada).catch((error: unknown) =>
+        this.logger.error({ err: error, rideId }, 'No se pudo escalar tras el rechazo'),
+      );
     }
   }
 
@@ -1118,7 +1278,16 @@ export class DispatchService {
      *    un conductor que ya había tenido esa oferta vencida chocaba con el
      *    índice único, la aceptación fallaba y la carrera quedaba «Notificada»
      *    sin temporizador, colgada para siempre.
+     *
+     * Y la aceptación va en la MISMA transacción (25/11/2026). Antes la
+     * carrera se pasaba a «Notificada» en un commit y se aceptaba en otro: si
+     * el conductor tomaba otra oferta en medio, la aceptación fallaba y una
+     * carrera que venía de «Sin asignar» quedaba «Notificada» sin
+     * temporizador, y `expireStaleUnassigned` no la veía. Ahora, si falla, no
+     * cambia nada.
      */
+    const eventIds: string[] = [];
+    const revokedDrivers: string[] = [];
     await this.db.transaction(async (tx) => {
       const [actual] = await tx
         .select({ status: rides.status, intento: rides.intentoDespacho, code: rides.code })
@@ -1187,9 +1356,11 @@ export class DispatchService {
           target: [rideOffers.rideId, rideOffers.driverId, rideOffers.wave, rideOffers.intento],
           set: { response: 'pending', revokedAt: null, respondedAt: null, expiresAt },
         });
-    });
 
-    return this.accept(rideId, driverId, actor);
+      await this.aceptarEnTx(tx, rideId, driverId, actor, eventIds, revokedDrivers);
+    }).catch(traducirConductorOcupado);
+
+    return this.trasAceptar(rideId, driverId, actor, eventIds, revokedDrivers);
   }
 
   async revokeOffers(rideId: string): Promise<void> {

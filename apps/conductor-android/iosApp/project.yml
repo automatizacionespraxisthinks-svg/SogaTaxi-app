@@ -1,0 +1,75 @@
+# Proyecto de Xcode de la app de iPhone, generado con XcodeGen:
+#
+#   brew install xcodegen
+#   cd apps/conductor-android/iosApp && xcodegen
+#
+# Eso crea SogaTaxiConductor.xcodeproj (no se guarda en git). Las pantallas y
+# la lógica vienen de ../shared (Kotlin Multiplatform); aquí solo está lo que
+# es de iPhone: el arranque, el Llavero y el socket.
+name: SogaTaxiConductor
+options:
+  bundleIdPrefix: co.sogataxi
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+packages:
+  SocketIO:
+    url: https://github.com/socketio/socket.io-client-swift
+    from: 16.1.0
+
+targets:
+  SogaTaxiConductor:
+    type: application
+    platform: iOS
+    sources:
+      - iosApp
+    dependencies:
+      - package: SocketIO
+    preBuildScripts:
+      - name: Compilar el código común (Kotlin)
+        basedOnDependencyAnalysis: false
+        script: |
+          cd "$SRCROOT/.."
+          chmod +x gradlew
+          ./gradlew :shared:embedAndSignAppleFrameworkForXcode
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: co.sogataxi.conductor
+        PRODUCT_NAME: SogaTaxi Conductor
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "2"
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"
+        # PENDIENTE: el equipo de la cuenta Apple Developer de SogaTaxi.
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+        FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"
+        OTHER_LDFLAGS: "$(inherited) -framework Conductor"
+        # El paso de Gradle escribe fuera de la carpeta de Xcode.
+        ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+      configs:
+        Debug:
+          # La API de desarrollo en la red local; se puede cambiar en el acceso.
+          API_BASE: "http://192.168.1.3:3000"
+        Release:
+          # PENDIENTE: el dominio de producción de la API. Solo HTTPS.
+          API_BASE: "https://api.sogataxi.example"
+    info:
+      path: iosApp/Info.plist
+      properties:
+        CFBundleDisplayName: SogaTaxi Conductor
+        API_BASE: "$(API_BASE)"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        CADisableMinimumFrameDurationOnPhone: true
+        # `location`: el GPS sigue con la pantalla bloqueada mientras el turno
+        # está abierto. Apple lo revisa al publicar.
+        UIBackgroundModes:
+          - location
+        NSLocationWhenInUseUsageDescription: "SogaTaxi envía tu ubicación a la oficina solo mientras tienes el turno abierto, para ofrecerte las carreras más cercanas."
+        NSLocalNetworkUsageDescription: "En pruebas, la app habla con la API de la oficina en la red local."
+        NSAppTransportSecurity:
+          # HTTP solo hacia la red local (pruebas). Producción es HTTPS.
+          NSAllowsLocalNetworking: true

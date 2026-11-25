@@ -6,6 +6,7 @@ import { uuidv7 } from 'uuidv7';
 import * as schema from '../db/schema';
 import { hashSecret } from '../common/crypto';
 import { base32Decode, totp } from '../common/totp';
+import { CENTRO } from './coordenadas';
 
 /**
  * Pago electrónico, suspensión y relevo de turno, de extremo a extremo.
@@ -29,9 +30,8 @@ import { base32Decode, totp } from '../common/totp';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
-const ADMIN = { email: 'prueba-pago@taxturistico.local', pass: 'clave-de-prueba-suficientemente-larga' };
+const ADMIN = { email: 'prueba-pago@sogataxi.local', pass: 'clave-de-prueba-suficientemente-larga' };
 const PIN = '4821';
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 
 /** Solo efectivo. */
 const EFECTIVO = { code: '101', plate: 'UBP472' };
@@ -166,6 +166,28 @@ async function main(): Promise<void> {
       .where(inArray(schema.drivers.code, TODOS.map((c) => c.code)));
   };
 
+  /*
+   * Desde el 18/11/2026 solo se abre turno en un vehículo permitido. El paso
+   * del relevo necesita que 103 pueda manejar el carro de 101, como pasa con
+   * un relevador del listado maestro; el vínculo se crea aquí y se borra al
+   * final, para no dejar a 103 con un carro que el seed no le dio.
+   */
+  const ID_VINCULO_RELEVO = uuidv7();
+  const vincularRelevo = async () => {
+    const [carro] = await db
+      .select({ id: schema.vehicles.id })
+      .from(schema.vehicles)
+      .where(eq(schema.vehicles.plate, EFECTIVO.plate))
+      .limit(1);
+    await db
+      .insert(schema.vehicleDrivers)
+      .values({ id: ID_VINCULO_RELEVO, vehicleId: carro!.id, driverId: idDe(RELEVO), role: 'relevador', origen: 'panel' })
+      .onConflictDoNothing();
+  };
+  const desvincularRelevo = async () => {
+    await db.delete(schema.vehicleDrivers).where(eq(schema.vehicleDrivers.id, ID_VINCULO_RELEVO));
+  };
+
   const limpiarAdmin = async () => {
     const usuarios = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.email, ADMIN.email));
     for (const u of usuarios) {
@@ -183,6 +205,7 @@ async function main(): Promise<void> {
     }
     await restaurar();
     await limpiarAdmin();
+    await vincularRelevo();
     const tokens = new Map<string, string>();
     for (const c of TODOS) {
       const t = await token(c);
@@ -331,6 +354,7 @@ async function main(): Promise<void> {
     console.log('\n✓ Pago electrónico, suspensión y relevo se cumplen de extremo a extremo\n');
   } finally {
     await restaurar();
+    await desvincularRelevo();
     for (const c of TODOS) {
       const login = await entrar(c);
       if (login.status < 400) await call('/v1/driver/shift/close', { method: 'POST', token: login.body.token as string });

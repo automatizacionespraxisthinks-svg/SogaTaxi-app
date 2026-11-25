@@ -23,11 +23,11 @@ import { AuditService } from '../modules/audit/audit.service';
  *   node dist/cli/usuarios.js
  *
  *   # generar una contraseña nueva, conservando su segundo factor
- *   node dist/cli/usuarios.js ana@taxturistico.co
+ *   node dist/cli/usuarios.js ana@example.com
  *
  *   # además, obligarle a dar de alta el segundo factor otra vez
  *   # (para cuando también se perdió el teléfono y los códigos de respaldo)
- *   node dist/cli/usuarios.js ana@taxturistico.co --reiniciar-segundo-factor
+ *   node dist/cli/usuarios.js ana@example.com --reiniciar-segundo-factor
  */
 
 @Injectable()

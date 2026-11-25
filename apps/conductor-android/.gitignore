@@ -10,3 +10,13 @@ lint-log.txt
 logcat-*.txt
 capturas/
 monitor-*.tsv
+ios-log.txt
+# iPhone: el proyecto de Xcode se genera con XcodeGen (iosApp/project.yml).
+iosApp/*.xcodeproj/
+iosApp/iosApp/Info.plist
+iosApp/build/
+xcuserdata/
+# La firma de la versión final: nunca en git.
+keystore.properties
+*.jks
+*.keystore

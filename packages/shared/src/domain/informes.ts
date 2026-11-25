@@ -27,7 +27,7 @@ export const METAS = {
 export const MAX_DIAS_INFORME = 93;
 
 /** Paipa. Colombia no cambia de hora en el año, pero mejor no suponerlo. */
-export const ZONA_HORARIA_PAIPA = 'America/Bogota';
+export const ZONA_HORARIA_LOCAL = 'America/Bogota';
 
 export const PERIODOS_RAPIDOS = ['hoy', 'ayer', '7d', '30d', 'mes', 'mes_pasado'] as const;
 export type PeriodoRapido = (typeof PERIODOS_RAPIDOS)[number];
@@ -44,19 +44,19 @@ export const ETIQUETA_PERIODO: Record<PeriodoRapido, string> = {
 /* ----------------------------------------------------------------- fechas --- */
 
 const formatoDia = new Intl.DateTimeFormat('en-CA', {
-  timeZone: ZONA_HORARIA_PAIPA,
+  timeZone: ZONA_HORARIA_LOCAL,
   year: 'numeric',
   month: '2-digit',
   day: '2-digit',
 });
 
 /** El día de hoy en Paipa: `2026-10-28`. */
-export function hoyEnPaipa(ahora = new Date()): string {
+export function hoyLocal(ahora = new Date()): string {
   return formatoDia.format(ahora);
 }
 
 /** El día en Paipa de un instante cualquiera. */
-export function diaEnPaipa(instante: Date): string {
+export function diaLocal(instante: Date): string {
   return formatoDia.format(instante);
 }
 
@@ -76,7 +76,7 @@ export function fechasDelRango(desde: string, hasta: string): string[] {
   return Array.from({ length: Math.max(0, diasDelRango(desde, hasta)) }, (_, i) => sumarDias(desde, i));
 }
 
-export function rangoDePeriodo(periodo: PeriodoRapido, hoy = hoyEnPaipa()): { desde: string; hasta: string } {
+export function rangoDePeriodo(periodo: PeriodoRapido, hoy = hoyLocal()): { desde: string; hasta: string } {
   const primeroDelMes = `${hoy.slice(0, 7)}-01`;
   switch (periodo) {
     case 'hoy':
@@ -97,7 +97,7 @@ export function rangoDePeriodo(periodo: PeriodoRapido, hoy = hoyEnPaipa()): { de
 }
 
 /** El periodo rápido que corresponde a un rango, si alguno coincide. */
-export function periodoDelRango(desde: string, hasta: string, hoy = hoyEnPaipa()): PeriodoRapido | null {
+export function periodoDelRango(desde: string, hasta: string, hoy = hoyLocal()): PeriodoRapido | null {
   return (
     PERIODOS_RAPIDOS.find((p) => {
       const r = rangoDePeriodo(p, hoy);

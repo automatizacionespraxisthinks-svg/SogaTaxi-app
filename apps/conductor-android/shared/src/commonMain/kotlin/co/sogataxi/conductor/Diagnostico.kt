@@ -3,12 +3,9 @@ package co.sogataxi.conductor
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
- * Lo que la fase 0 tiene que demostrar, medido en el teléfono:
+ * Lo que el piloto tiene que demostrar, medido en el teléfono:
  *
  *  - que el GPS sigue llegando con la pantalla apagada (`lecturasPantallaApagada`);
  *  - cuánto fue lo más que pasó sin una lectura (`mayorHuecoSeg`): si el
@@ -37,19 +34,18 @@ object Diagnostico {
     private val estado = MutableStateFlow(Estado())
     val flujo: StateFlow<Estado> = estado
 
-    private val hora = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-
     fun evento(texto: String) {
-        // También al registro de Android: así se lee por USB (adb logcat -s
-        // SogaTaxi) aunque la pantalla en que está el conductor no lo muestre.
-        android.util.Log.i("SogaTaxi", texto)
+        // También al registro del sistema, solo en la versión de depuración
+        // (en Android: adb logcat -s SogaTaxi). En la final no, porque los
+        // eventos llevan la dirección de recogida.
+        plataforma.registrar(texto)
         estado.update {
-            it.copy(eventos = (listOf("${hora.format(Date())}  $texto") + it.eventos).take(60))
+            it.copy(eventos = (listOf("${horaDelDia()}  $texto") + it.eventos).take(60))
         }
     }
 
     fun turnoIniciado() = estado.update {
-        Estado(turnoDesde = System.currentTimeMillis(), eventos = it.eventos)
+        Estado(turnoDesde = ahoraMs(), eventos = it.eventos)
     }
 
     fun turnoTerminado() = estado.update { it.copy(turnoDesde = null, socket = false) }
@@ -59,9 +55,9 @@ object Diagnostico {
         estado.update { it.copy(socket = conectado) }
     }
 
-    fun lectura(precision: Float?, pantallaEncendida: Boolean) {
-        val ahora = System.currentTimeMillis()
-        val hueco = estado.value.ultimaLectura?.let { antes -> (ahora - antes) / 1000 } ?: 0
+    fun lectura(precision: Float?, pantallaEncendida: Boolean, contarHueco: Boolean = true) {
+        val ahora = ahoraMs()
+        val hueco = if (!contarHueco) 0 else estado.value.ultimaLectura?.let { antes -> (ahora - antes) / 1000 } ?: 0
         if (hueco >= 30) evento("Hueco de GPS: $hueco s sin lecturas")
         estado.update {
             it.copy(
@@ -75,16 +71,16 @@ object Diagnostico {
     }
 
     fun envio(ok: Boolean) = estado.update {
-        if (ok) it.copy(enviadas = it.enviadas + 1, ultimoEnvio = System.currentTimeMillis())
+        if (ok) it.copy(enviadas = it.enviadas + 1, ultimoEnvio = ahoraMs())
         else it.copy(fallidas = it.fallidas + 1)
     }
 
     /** Un resumen para copiar y pegar en el informe de la prueba. */
     fun resumen(): String {
         val e = estado.value
-        val minutos = e.turnoDesde?.let { (System.currentTimeMillis() - it) / 60_000 } ?: 0
+        val minutos = e.turnoDesde?.let { (ahoraMs() - it) / 60_000 } ?: 0
         return buildString {
-            appendLine("Fase 0 · ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE}")
+            appendLine("SogaTaxi · ${plataforma.dispositivo} · ${plataforma.sistema}")
             appendLine("Turno: $minutos min · socket ${if (e.socket) "conectado" else "caído"}")
             appendLine("Lecturas GPS: ${e.lecturas} (con pantalla apagada: ${e.lecturasPantallaApagada})")
             appendLine("Mayor hueco sin GPS: ${e.mayorHuecoSeg} s")

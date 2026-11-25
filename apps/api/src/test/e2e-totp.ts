@@ -20,7 +20,7 @@ import { base32Decode, counterAt, totp } from '../common/totp';
  */
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
-const EMAIL = 'operadora@taxturistico.local';
+const EMAIL = 'operadora@sogataxi.local';
 const PASSWORD = 'desarrollo-no-usar-en-produccion';
 
 function assert(condition: boolean, message: string, context?: unknown): void {
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     const { secret, uri } = setup.body as { secret: string; uri: string };
     assert(/^[A-Z2-7]{32}$/.test(secret), 'el secreto son 20 bytes en base32');
     assert(uri.startsWith('otpauth://totp/'), 'y viene el URI para el QR');
-    assert(uri.includes('issuer=Tax'), 'con el emisor, que es lo que muestra el teléfono');
+    assert(uri.includes('issuer=SogaTaxi'), 'con el emisor, que es lo que muestra el teléfono');
 
     const malo = await call('/v1/auth/totp/activate', { method: 'POST', body: { code: '000000' } });
     assert(code(malo.body) === 'TOTP_INVALID', 'un código equivocado no activa nada');
@@ -190,6 +190,33 @@ async function main(): Promise<void> {
       'la base guardó el intervalo quemado',
       fila?.counter,
     );
+
+    console.log('\n3b. Dos accesos a la vez con el mismo código: solo entra uno');
+
+    // Un intervalo todavía sin quemar, enviado dos veces en el mismo instante.
+    // Los dos pasan la comprobación; antes los dos entraban.
+    cookie = undefined;
+    // La ventana solo admite un intervalo de adelanto y ese ya se quemó
+    // arriba: se libera el contador para tener un código legítimo, y al
+    // final se deja como estaba.
+    await db.update(schema.users).set({ totpLastCounter: null }).where(eq(schema.users.id, userId));
+    const aLaVez = totp(bytes);
+    const gemelos = await Promise.all(
+      [1, 2].map(() =>
+        fetch(`${BASE}/v1/auth/session`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ email: EMAIL, password: PASSWORD, totp: aLaVez }),
+        }).then((r) => r.status),
+      ),
+    );
+    assert(
+      gemelos.filter((s) => s < 400).length === 1 && gemelos.filter((s) => s === 401).length === 1,
+      `uno entra y el otro se rechaza (HTTP ${gemelos.join(' y ')})`,
+      gemelos,
+    );
+    await db.update(schema.users).set({ totpLastCounter: counterAt() + 1 }).where(eq(schema.users.id, userId));
+    cookie = undefined;
 
     console.log('\n4. El código de respaldo abre, una sola vez');
 

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 import { uuidv7 } from 'uuidv7';
+import { CENTRO } from './coordenadas';
 
 /**
  * Cambiar de carro y cambiar de conductor, de extremo a extremo (17/11/2026).
@@ -29,7 +30,6 @@ import { uuidv7 } from 'uuidv7';
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
 const PIN = '4821';
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 const UNO = '101';
 const OTRO = '103';
 const CELULAR = `mano-${Date.now()}`;

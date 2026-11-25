@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { CENTRO } from './coordenadas';
 
 /**
  * El recorrido de las oleadas, tal como se ve desde el panel.
@@ -34,9 +35,8 @@ const APARTADOS = [
 ];
 const PIN = '4821';
 
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 /** Unos 19 km al norte: fuera de los 12 km de la tercera oleada urbana. */
-const LEJOS = { lat: 5.95, lng: -73.1142 };
+const LEJOS = { lat: 5.95, lng: -72.9279 };
 
 interface WaveLogEntry {
   wave: number;

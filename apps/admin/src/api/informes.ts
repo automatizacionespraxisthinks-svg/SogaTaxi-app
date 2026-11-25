@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router';
 import type { FiltrosDeInforme, OpcionesDeInforme, TableroInforme } from '@tax/shared';
-import { MAX_DIAS_INFORME, diasDelRango, hoyEnPaipa, rangoDePeriodo } from '@tax/shared';
+import { MAX_DIAS_INFORME, diasDelRango, hoyLocal, rangoDePeriodo } from '@tax/shared';
 import { api } from './client';
 
 /**
@@ -69,7 +69,7 @@ export function useFiltrosDeInforme() {
     filtros.zonas?.length || filtros.tipoZona || filtros.conductor || filtros.lineas?.length || !filtros.sinPruebas,
   );
 
-  return { filtros, cambiar, hayFiltros, hoy: hoyEnPaipa() };
+  return { filtros, cambiar, hayFiltros, hoy: hoyLocal() };
 }
 
 export function aConsulta(f: FiltrosDeInforme): string {
@@ -115,7 +115,7 @@ export function useCifrasRecientes(habilitado: boolean) {
 
 /** Cifras del conductor HOY, para Flota: de un tablero de solo hoy. */
 export function useCifrasDeHoy(habilitado: boolean) {
-  const hoy = hoyEnPaipa();
+  const hoy = hoyLocal();
   const filtros: FiltrosDeInforme = { desde: hoy, hasta: hoy, sinPruebas: false };
   return useQuery({
     queryKey: ['reports', 'hoy', hoy],

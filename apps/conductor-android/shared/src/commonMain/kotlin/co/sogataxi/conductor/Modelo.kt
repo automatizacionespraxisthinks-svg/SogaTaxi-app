@@ -1,7 +1,8 @@
 package co.sogataxi.conductor
 
-import org.json.JSONObject
-import java.time.Instant
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * Una pantalla por estado, como la PWA: no hay menús ni navegación que
@@ -38,40 +39,41 @@ data class Carrera(
 ) {
     val tienePunto: Boolean get() = lat != null && lng != null
 
-    fun aJson(): JSONObject = JSONObject()
-        .put("id", rideId).put("code", codigo).put("pickupText", recogida)
-        .put("pickupReference", referencia).put("pickupLat", lat).put("pickupLng", lng)
-        .put("pickupLink", enlace).put("pagoElectronico", pagoElectronico)
-        .put("passengers", pasajeros).put("notes", notas)
-        .put("customerName", cliente).put("customerPhone", telefono)
-        .put("startedAtMs", abordoDesde).put("pickupPhotoAt", fotoEn)
+    fun aJson(): JsonObject = buildJsonObject {
+        put("id", rideId)
+        put("code", codigo)
+        put("pickupText", recogida)
+        si("pickupReference", referencia)
+        si("pickupLat", lat)
+        si("pickupLng", lng)
+        si("pickupLink", enlace)
+        put("pagoElectronico", pagoElectronico)
+        put("passengers", pasajeros)
+        si("notes", notas)
+        si("customerName", cliente)
+        si("customerPhone", telefono)
+        si("startedAtMs", abordoDesde)
+        si("pickupPhotoAt", fotoEn)
+    }
 
     companion object {
-        private fun JSONObject.texto(nombre: String): String? =
-            if (isNull(nombre)) null else optString(nombre).takeIf { it.isNotBlank() }
-
-        private fun JSONObject.numero(nombre: String): Double? =
-            if (isNull(nombre) || !has(nombre)) null else optDouble(nombre).takeIf { !it.isNaN() }
-
         /** Desde `activeRide` de la API o desde lo guardado en el teléfono. */
-        fun deJson(j: JSONObject): Carrera {
+        fun deJson(j: JsonObject): Carrera {
             val sinUbicar = j.texto("pickupSource") == "sin_ubicar"
-            val inicio = j.texto("startedAt")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
-                ?: if (j.has("startedAtMs") && !j.isNull("startedAtMs")) j.optLong("startedAtMs") else null
             return Carrera(
-                rideId = j.getString("id"),
-                codigo = j.optString("code"),
-                recogida = j.optString("pickupText"),
+                rideId = j.texto("id") ?: error("Carrera sin id"),
+                codigo = j.texto("code").orEmpty(),
+                recogida = j.texto("pickupText").orEmpty(),
                 referencia = j.texto("pickupReference"),
-                lat = if (sinUbicar) null else j.numero("pickupLat"),
-                lng = if (sinUbicar) null else j.numero("pickupLng"),
+                lat = if (sinUbicar) null else j.doble("pickupLat"),
+                lng = if (sinUbicar) null else j.doble("pickupLng"),
                 enlace = j.texto("pickupLink"),
-                pagoElectronico = j.optBoolean("pagoElectronico"),
-                pasajeros = j.optInt("passengers", 1),
+                pagoElectronico = j.booleano("pagoElectronico"),
+                pasajeros = j.entero("passengers") ?: 1,
                 notas = j.texto("notes"),
                 cliente = j.texto("customerName"),
                 telefono = j.texto("customerPhone"),
-                abordoDesde = inicio,
+                abordoDesde = instanteMs(j.texto("startedAt")) ?: j.largo("startedAtMs"),
                 fotoEn = j.texto("pickupPhotoAt"),
             )
         }
@@ -97,27 +99,40 @@ data class EstadoSesion(
     val aviso: String? = null,
 ) {
     /** Lo que se guarda para abrir sin señal donde estaba. Una oferta no: sin señal no se acepta. */
-    fun aJson(): JSONObject = JSONObject()
-        .put("fase", (if (fase == Fase.RESUMEN) Fase.DISPONIBLE else fase).name)
-        .put("estadoCarrera", estadoCarrera.name)
-        .put("carrera", carrera?.aJson())
-        .put("turnoDesde", turnoDesde)
-        .put("placa", placa)
-        .put("carrerasHoy", carrerasHoy)
-        .put("minutosMinimos", minutosMinimos)
-        .put("radioLlegada", radioLlegada)
+    fun aJson(): JsonObject = buildJsonObject {
+        put("fase", (if (fase == Fase.RESUMEN) Fase.DISPONIBLE else fase).name)
+        put("estadoCarrera", estadoCarrera.name)
+        si("carrera", carrera?.aJson())
+        si("turnoDesde", turnoDesde)
+        si("placa", placa)
+        put("carrerasHoy", carrerasHoy)
+        si("minutosMinimos", minutosMinimos)
+        put("radioLlegada", radioLlegada)
+    }
 
     companion object {
-        fun deJson(j: JSONObject) = EstadoSesion(
-            fase = runCatching { Fase.valueOf(j.getString("fase")) }.getOrDefault(Fase.FUERA_DE_TURNO),
-            estadoCarrera = runCatching { EstadoCarrera.valueOf(j.getString("estadoCarrera")) }
+        fun deJson(j: JsonObject) = EstadoSesion(
+            fase = runCatching { Fase.valueOf(j.texto("fase")!!) }.getOrDefault(Fase.FUERA_DE_TURNO),
+            estadoCarrera = runCatching { EstadoCarrera.valueOf(j.texto("estadoCarrera")!!) }
                 .getOrDefault(EstadoCarrera.ASSIGNED),
-            carrera = j.optJSONObject("carrera")?.let { Carrera.deJson(it) },
-            turnoDesde = if (j.isNull("turnoDesde")) null else j.optLong("turnoDesde"),
-            placa = if (j.isNull("placa")) null else j.optString("placa"),
-            carrerasHoy = j.optInt("carrerasHoy"),
-            minutosMinimos = if (j.isNull("minutosMinimos")) null else j.optInt("minutosMinimos"),
-            radioLlegada = j.optInt("radioLlegada", 150),
+            carrera = j.objeto("carrera")?.let { Carrera.deJson(it) },
+            turnoDesde = j.largo("turnoDesde"),
+            placa = j.texto("placa"),
+            carrerasHoy = j.entero("carrerasHoy") ?: 0,
+            minutosMinimos = j.entero("minutosMinimos"),
+            radioLlegada = j.entero("radioLlegada") ?: 150,
         )
     }
+}
+
+enum class Etapa(val ruta: String, val nombre: String) {
+    LLEGUE("arrived", "Llegué"),
+    A_BORDO("board", "Pasajero a bordo"),
+    FINALIZAR("finish", "Finalizar"),
+}
+
+/** La última posición leída, para las etapas de la carrera (`at`). */
+object Posicion {
+    @kotlin.concurrent.Volatile
+    var ultima: Pair<Double, Double>? = null
 }

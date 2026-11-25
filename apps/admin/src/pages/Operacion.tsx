@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Bot, CarFront, Check, Inbox, Plus, Timer, TriangleAlert } from 'lucide-react';
 import type { Ride, RideStatus } from '@tax/shared';
-import { METAS, RIDE_STATUS_LABEL, RIDE_STATUS_TONE, diaEnPaipa, formatRelative } from '@tax/shared';
+import { METAS, RIDE_STATUS_LABEL, RIDE_STATUS_TONE, diaLocal, formatRelative } from '@tax/shared';
 import {
   BANDA_DE_ESTADO,
   Button,
@@ -43,7 +43,7 @@ function duracion(segundos: number): { valor: number; unidad: string } {
 
 /** Si la carrera se pidió hoy, en hora de Colombia. */
 function esDeHoy(iso: string): boolean {
-  return diaEnPaipa(new Date(iso)) === diaEnPaipa(new Date());
+  return diaLocal(new Date(iso)) === diaLocal(new Date());
 }
 
 export function Operacion() {

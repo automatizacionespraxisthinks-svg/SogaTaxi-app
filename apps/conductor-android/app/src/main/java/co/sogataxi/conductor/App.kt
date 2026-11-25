@@ -7,9 +7,11 @@ import android.app.NotificationManager
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
-        Prefs.init(this)
+        // Antes que nada: el código común no puede guardar, hablar por la red
+        // ni avisar sin saber en qué sistema está.
+        plataforma = PlataformaAndroid(this)
         crearCanales()
-        Sesion.iniciar(this)
+        Sesion.iniciar()
     }
 
     private fun crearCanales() {
@@ -36,10 +38,21 @@ class App : Application() {
                 setBypassDnd(true)
             },
         )
+
+        // Avisos al conductor que no son ofertas: hoy, que el turno se
+        // interrumpió porque Android cerró la app. Suena una vez (sonido del
+        // canal) para que no se quede sin saber que dejó de recibir carreras.
+        gestor.createNotificationChannel(
+            NotificationChannel(CANAL_AVISOS, "Avisos del turno", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Avisa si el turno dejó de enviar la ubicación y de recibir ofertas."
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            },
+        )
     }
 
     companion object {
         const val CANAL_TURNO = "turno"
         const val CANAL_OFERTAS = "ofertas"
+        const val CANAL_AVISOS = "avisos"
     }
 }

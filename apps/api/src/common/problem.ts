@@ -174,7 +174,9 @@ export class AppError extends Error {
 
   toProblem(instance?: string): ProblemDocument {
     return {
-      type: `https://docs.taxturistico.co/errores/${this.code.toLowerCase()}`,
+      // URN y no URL (RFC 9457 lo permite): no hay página de errores
+      // publicada, y la de antes apuntaba al dominio de Tax Turístico.
+      type: `urn:sogataxi:error:${this.code.toLowerCase()}`,
       title: ERROR_CODES[this.code],
       status: this.status,
       code: this.code,

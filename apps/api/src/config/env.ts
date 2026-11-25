@@ -29,7 +29,7 @@ const envSchema = z.object({
   TRUST_PROXY: z.string().default('loopback, linklocal, uniquelocal'),
   /**
    * De qué servidores se pueden bajar fotos del lugar (17/11/2026), separados
-   * por coma, por ejemplo el de Chatwoot: `chat.taxturistico.co`. Con la
+   * por coma, por ejemplo el de Chatwoot: `chat.example.com`. Con la
    * lista, solo esos (y sus subdominios), aunque sean internos. Sin ella,
    * cualquiera que no sea una dirección privada o del propio servidor.
    */
@@ -56,8 +56,12 @@ const envSchema = z.object({
    */
   VAPID_PUBLIC_KEY: z.string().min(20).optional(),
   VAPID_PRIVATE_KEY: z.string().min(20).optional(),
-  /** Contacto que el servicio de push usa si hay un problema con los envíos. */
-  VAPID_SUBJECT: z.string().startsWith('mailto:').default('mailto:soporte@taxturistico.co'),
+  /**
+   * Contacto que el servicio de push usa si hay un problema con los envíos.
+   * Sin valor por defecto: el de antes era el correo de Tax Turístico. Es
+   * obligatorio solo si hay claves VAPID (ver la comprobación de abajo).
+   */
+  VAPID_SUBJECT: z.string().startsWith('mailto:').optional(),
 
   /** Cookie de sesión de la oficina. */
   SESSION_SECRET: z.string().min(32),
@@ -223,17 +227,85 @@ const envSchema = z.object({
   POSITION_PURGE_CRON: z.string().default('0 4 * * *'),
   PURGE_TIMEZONE: z.string().default('America/Bogota'),
 
+  /**
+   * La app Android del conductor se instala desde un APK que entrega la
+   * empresa, sin tienda: la versión publicada se declara aquí y la app la
+   * consulta (`GET /v1/app/conductor-android`). Al subir un APK nuevo se
+   * cambian el número y, si hace falta, el enlace.
+   *
+   * `APP_ANDROID_MIN_VERSION_CODE`: por debajo de esa, la app no deja abrir
+   * turno hasta actualizar. Para cuando una versión vieja ya no se entiende
+   * con la API.
+   */
+  APP_ANDROID_VERSION_CODE: z.coerce.number().int().min(1).optional(),
+  APP_ANDROID_VERSION_NAME: z.string().max(40).optional(),
+  APP_ANDROID_URL: z.string().url().max(500).optional(),
+  APP_ANDROID_MIN_VERSION_CODE: z.coerce.number().int().min(1).optional(),
+
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+}).superRefine((env, ctx) => {
+  if (env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY && !env.VAPID_SUBJECT) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['VAPID_SUBJECT'],
+      message: 'Con claves VAPID hace falta el contacto (mailto:...) de SogaTaxi',
+    });
+  }
+
+  if (env.NODE_ENV !== 'production') return;
+
+  // El conductor instala lo que baje de este enlace: por HTTP cualquiera en
+  // su red podría cambiarle el APK por otro.
+  if (env.APP_ANDROID_URL && !env.APP_ANDROID_URL.startsWith('https://')) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['APP_ANDROID_URL'],
+      message: 'El enlace de descarga de la app tiene que ser HTTPS',
+    });
+  }
+
+  // En producción no se arranca con los secretos de ejemplo: el
+  // .env.example trae una ENCRYPTION_KEY de ceros que cumple el formato, y
+  // con ella el secreto TOTP y las cédulas quedarían cifrados con una clave
+  // conocida.
+  if (claveTrivial(env.ENCRYPTION_KEY)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['ENCRYPTION_KEY'],
+      message: 'Es una clave de ejemplo o trivial. Genera una con: openssl rand -hex 32',
+    });
+  }
+  if (/cambia-esto/i.test(env.SESSION_SECRET) || claveTrivial(env.SESSION_SECRET)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['SESSION_SECRET'],
+      message: 'Es el secreto de ejemplo o uno trivial. Genera uno con: openssl rand -hex 32',
+    });
+  }
 });
+
+/**
+ * Una clave «trivial» repite muy pocos caracteres (ceros, «aaaa…», «0101…»).
+ * Una aleatoria de 64 hex usa casi siempre los 16 dígitos; con menos de 8
+ * distintos es casi seguro que alguien la escribió a mano.
+ */
+export function claveTrivial(valor: string): boolean {
+  return new Set(valor.toLowerCase()).size < 8;
+}
 
 export type Env = z.infer<typeof envSchema>;
 
 let cached: Env | undefined;
 
+/** Valida sin guardar en caché: para las pruebas. */
+export function validarEnv(source: NodeJS.ProcessEnv) {
+  return envSchema.safeParse(source);
+}
+
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   if (cached) return cached;
 
-  const parsed = envSchema.safeParse(source);
+  const parsed = validarEnv(source);
   if (!parsed.success) {
     const detail = parsed.error.issues
       .map((issue) => `  ${issue.path.join('.') || '(raíz)'}: ${issue.message}`)

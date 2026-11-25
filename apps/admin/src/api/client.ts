@@ -71,14 +71,51 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (response.status === 204) return undefined as T;
 
-  const text = await response.text();
-  const payload: unknown = text ? JSON.parse(text) : null;
+  /*
+   * Durante un despliegue el proxy contesta con HTML (502). Antes eso rompía
+   * `JSON.parse` con un SyntaxError que no era `ApiError`, y el panel no
+   * podía decir «el servidor no responde». Igual que en la PWA.
+   */
+  let text = '';
+  try {
+    text = await response.text();
+  } catch (cause) {
+    // La conexión se cortó a mitad del cuerpo. En un error no importa (se
+    // informa con el código HTTP); en una respuesta buena no se puede dar
+    // por recibida, o la pantalla recibiría `null` donde espera datos.
+    if (response.ok) {
+      throw new ApiError({
+        type: 'about:blank',
+        title: 'Sin conexión con el servidor',
+        status: 0,
+        code: 'NETWORK',
+        detail: cause instanceof Error ? cause.message : undefined,
+      });
+    }
+  }
+  let payload: unknown = null;
+  let jsonInvalido = false;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    jsonInvalido = true;
+  }
+
+  if (response.ok && jsonInvalido) {
+    throw new ApiError({
+      type: 'about:blank',
+      title: 'El servidor respondió algo que el panel no entiende',
+      status: response.status,
+      code: 'INTERNAL',
+    });
+  }
 
   if (!response.ok) {
     const problem = payload as Partial<ProblemDocument> | null;
     throw new ApiError({
       type: problem?.type ?? 'about:blank',
-      title: problem?.title ?? response.statusText,
+      // En HTTP/2 `statusText` viene vacío: sin esto el aviso salía sin texto.
+      title: problem?.title || response.statusText || 'El servidor no responde bien: intenta de nuevo en un momento',
       status: problem?.status ?? response.status,
       code: problem?.code ?? 'INTERNAL',
       detail: problem?.detail,

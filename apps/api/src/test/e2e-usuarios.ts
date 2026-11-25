@@ -21,8 +21,8 @@ import { base32Decode, totp } from '../common/totp';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const CLAVE = 'clave-de-prueba-suficientemente-larga';
-const ADMIN = 'prueba-admin-u@taxturistico.local';
-const OPERADOR = 'prueba-oper-u@taxturistico.local';
+const ADMIN = 'prueba-admin-u@sogataxi.local';
+const OPERADOR = 'prueba-oper-u@sogataxi.local';
 
 function assert(condition: boolean, message: string, context?: unknown): void {
   if (!condition) {

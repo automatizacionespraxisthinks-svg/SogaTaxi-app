@@ -39,7 +39,9 @@ export class PushService implements OnModuleInit {
   onModuleInit(): void {
     const { VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT } = this.env;
 
-    if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+    // VAPID_SUBJECT lo exige loadEnv() cuando hay claves; se mira aquí solo
+    // para que el tipo lo sepa.
+    if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY || !VAPID_SUBJECT) {
       this.logger.warn('Sin claves VAPID: los avisos irán solo por socket');
       return;
     }

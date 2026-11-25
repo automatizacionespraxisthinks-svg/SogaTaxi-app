@@ -1,18 +1,5 @@
 package co.sogataxi.conductor
 
-import android.app.NotificationManager
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Intent
-import android.net.Uri
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import android.os.PowerManager
-import android.provider.Settings
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -52,19 +39,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import org.json.JSONArray
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 
 /* ------------------------------------------------------------------ acceso */
 
@@ -80,7 +68,7 @@ fun PantallaAcceso(sesion: EstadoSesion) {
     Columna {
         Text("Entrar", fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Marca.tinta)
         Text("SogaTaxi S.A. · aplicación de conductores", color = Marca.apagado)
-        if (BuildConfig.API_EDITABLE) {
+        if (plataforma.apiEditable) {
             OutlinedTextField(
                 value = api, onValueChange = { api = it }, label = { Text("Dirección de la API (pruebas)") },
                 singleLine = true, modifier = Modifier.fillMaxWidth(),
@@ -104,7 +92,7 @@ fun PantallaAcceso(sesion: EstadoSesion) {
             error = null
             Prefs.apiBase = api
             escena.launch {
-                error = Sesion.entrar(codigo, pin, "${Build.MANUFACTURER} ${Build.MODEL} (app nativa)")
+                error = Sesion.entrar(codigo, pin, "${plataforma.dispositivo} (app nativa)")
                 enviando = false
             }
         }
@@ -119,19 +107,21 @@ fun PantallaAcceso(sesion: EstadoSesion) {
 
 @Composable
 fun PantallaFueraDeTurno(sesion: EstadoSesion, alAbrir: () -> Unit) {
-    val contexto = LocalContext.current
     val escena = rememberCoroutineScope()
     var placa by remember { mutableStateOf(Prefs.placa.orEmpty()) }
     var error by remember { mutableStateOf<String?>(null) }
     var enviando by remember { mutableStateOf(false) }
     var refresco by remember { mutableIntStateOf(0) }
-    val pedirPermisos = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresco++ }
+    val pedirPermisos = rememberPedirPermisos { refresco++ }
+    // Una versión que ya no se entiende con la oficina no abre turno.
+    val versionNueva by Actualizacion.flujo.collectAsState()
+    val hayQueActualizar = versionNueva?.obligatoria == true
 
     Columna {
         Text("Fuera de turno", fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Marca.tinta)
         Text("Abre el turno para empezar a recibir carreras.", color = Marca.apagado, fontSize = 18.sp)
 
-        Chequeo(refresco, alPedirPermisos = { pedirPermisos.launch(permisosDeTurno()) })
+        Chequeo(refresco, alPedirPermisos = pedirPermisos)
 
         PlacasPermitidas(elegida = placa, alElegir = { placa = it })
         OutlinedTextField(
@@ -139,8 +129,11 @@ fun PantallaFueraDeTurno(sesion: EstadoSesion, alAbrir: () -> Unit) {
             label = { Text("Placa del vehículo de hoy") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
         )
         error?.let { Text(it, color = Marca.rojo) }
-        BotonGrande("Iniciar turno", habilitado = !enviando && placa.length >= 5) {
-            if (!tienePermisoDeUbicacion(contexto)) {
+        if (hayQueActualizar) {
+            Text("Esta versión de la app ya no sirve. Toca «Actualizar» arriba, instala la nueva y vuelve a entrar.", color = Marca.rojo)
+        }
+        BotonGrande("Iniciar turno", habilitado = !enviando && placa.length >= 5 && !hayQueActualizar) {
+            if (!plataforma.tienePermisoDeUbicacion()) {
                 error = "Primero permite la ubicación (arriba)."
                 return@BotonGrande
             }
@@ -170,10 +163,11 @@ fun PlacasPermitidas(elegida: String, alElegir: (String) -> Unit) {
     var placas by remember { mutableStateOf<List<Pair<String, String?>>>(emptyList()) }
     LaunchedEffect(Unit) {
         runCatching {
-            val lista = Api.get("/v1/driver/vehicles") as JSONArray
-            placas = (0 until lista.length()).map {
-                val v = lista.getJSONObject(it)
-                v.getString("plate") to v.optString("interno").takeIf { s -> s.isNotBlank() && s != "null" }
+            val lista = Api.get("/v1/driver/vehicles") as JsonArray
+            placas = lista.mapNotNull { elemento ->
+                val v = elemento as? JsonObject ?: return@mapNotNull null
+                val placa = v.texto("plate") ?: return@mapNotNull null
+                placa to v.texto("interno")
             }
         }
     }
@@ -212,7 +206,6 @@ private fun CambiarConductor() {
 
 @Composable
 fun PantallaEnTurno(sesion: EstadoSesion, alCerrar: () -> Unit) {
-    val contexto = LocalContext.current
     val escena = rememberCoroutineScope()
     val enPausa = sesion.fase == Fase.PAUSA
     var error by remember { mutableStateOf<String?>(null) }
@@ -220,7 +213,7 @@ fun PantallaEnTurno(sesion: EstadoSesion, alCerrar: () -> Unit) {
     var cambiandoCarro by remember { mutableStateOf(false) }
     var placaNueva by remember { mutableStateOf("") }
     var refresco by remember { mutableIntStateOf(0) }
-    val pedirPermisos = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresco++ }
+    val pedirPermisos = rememberPedirPermisos { refresco++ }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { refresco++ }
 
     fun hacer(accion: suspend () -> String?) {
@@ -251,7 +244,7 @@ fun PantallaEnTurno(sesion: EstadoSesion, alCerrar: () -> Unit) {
         }
 
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Chequeo(refresco, alPedirPermisos = { pedirPermisos.launch(permisosDeTurno()) })
+            Chequeo(refresco, alPedirPermisos = pedirPermisos)
 
             Tarjeta {
                 Dato("Carreras de hoy", "${sesion.carrerasHoy}")
@@ -288,13 +281,11 @@ fun PantallaEnTurno(sesion: EstadoSesion, alCerrar: () -> Unit) {
                 }
             }
 
-            if (BuildConfig.DEBUG) {
+            if (plataforma.depuracion) {
                 OutlinedButton(
                     onClick = {
-                        Toast.makeText(contexto, "Bloquea el teléfono: la alerta llega en 10 s", Toast.LENGTH_LONG).show()
-                        Handler(Looper.getMainLooper()).postDelayed(
-                            { Ofertas.mostrar(contexto.applicationContext, OfertaDeCarrera.deMentira()) }, 10_000,
-                        )
+                        plataforma.mensajeBreve("Bloquea el teléfono: la alerta llega en 10 s")
+                        Ofertas.probarEn(10_000)
                     },
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                 ) { Text("Probar la alerta de oferta (en 10 s)", color = Marca.tinta) }
@@ -318,10 +309,10 @@ fun PantallaEnTurno(sesion: EstadoSesion, alCerrar: () -> Unit) {
 @Composable
 private fun DuracionDelTurno(desde: Long?) {
     if (desde == null) return
-    var ahora by remember { mutableStateOf(System.currentTimeMillis()) }
+    var ahora by remember { mutableStateOf(ahoraMs()) }
     LaunchedEffect(Unit) {
         while (true) {
-            ahora = System.currentTimeMillis()
+            ahora = ahoraMs()
             delay(30_000)
         }
     }
@@ -359,36 +350,14 @@ fun PantallaResumen(sesion: EstadoSesion) {
  */
 @Composable
 fun Chequeo(refresco: Int, alPedirPermisos: () -> Unit) {
-    val contexto = LocalContext.current
-    val ubicacion = remember(refresco) { tienePermisoDeUbicacion(contexto) }
-    val avisos = remember(refresco) { NotificationManagerCompat.from(contexto).areNotificationsEnabled() }
-    val pantallaCompleta = remember(refresco) {
-        Build.VERSION.SDK_INT < 34 ||
-            contexto.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
-    }
-    val bateria = remember(refresco) {
-        contexto.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(contexto.packageName)
-    }
-    if (ubicacion && avisos && pantallaCompleta && bateria) return
+    val requisitos = remember(refresco) { plataforma.requisitos() }
+    if (requisitos.all { it.listo }) return
 
     Tarjeta {
         Text("Falta permitir", fontWeight = FontWeight.Bold, fontSize = 18.sp)
         Text("Sin esto el teléfono puede dejar de enviar el GPS o no sonar con las ofertas.", color = Marca.apagado)
         Spacer(Modifier.height(6.dp))
-        FilaChequeo("Ubicación", ubicacion, alPedirPermisos)
-        FilaChequeo("Notificaciones", avisos, alPedirPermisos)
-        FilaChequeo("Ofertas a pantalla completa", pantallaCompleta) {
-            if (Build.VERSION.SDK_INT >= 34) {
-                contexto.startActivity(
-                    Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:${contexto.packageName}")),
-                )
-            }
-        }
-        FilaChequeo("Sin límite de batería", bateria) {
-            contexto.startActivity(
-                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${contexto.packageName}")),
-            )
-        }
+        requisitos.forEach { FilaChequeo(it.nombre, it.listo, it.arreglar ?: alPedirPermisos) }
     }
 }
 
@@ -407,13 +376,13 @@ private fun FilaChequeo(texto: String, listo: Boolean, alArreglar: () -> Unit) {
 /** Para el piloto con conductores: plegado, se abre si hace falta reportar algo. */
 @Composable
 fun PanelDiagnostico() {
-    val contexto = LocalContext.current
+    val portapapeles = LocalClipboardManager.current
     val diag by Diagnostico.flujo.collectAsState()
     var abierto by remember { mutableStateOf(false) }
-    var ahora by remember { mutableStateOf(System.currentTimeMillis()) }
+    var ahora by remember { mutableStateOf(ahoraMs()) }
     LaunchedEffect(abierto) {
         while (abierto) {
-            ahora = System.currentTimeMillis()
+            ahora = ahoraMs()
             delay(1_000)
         }
     }
@@ -429,9 +398,8 @@ fun PanelDiagnostico() {
                 Text(if (abierto) "▾ Diagnóstico" else "▸ Diagnóstico", color = Marca.tinta, fontWeight = FontWeight.Bold)
             }
             TextButton(onClick = {
-                contexto.getSystemService(ClipboardManager::class.java)
-                    .setPrimaryClip(ClipData.newPlainText("Diagnóstico", Diagnostico.resumen()))
-                Toast.makeText(contexto, "Resumen copiado", Toast.LENGTH_SHORT).show()
+                portapapeles.setText(AnnotatedString(Diagnostico.resumen()))
+                plataforma.mensajeBreve("Resumen copiado")
             }) { Text("Copiar", color = Marca.tinta) }
         }
         if (abierto) {

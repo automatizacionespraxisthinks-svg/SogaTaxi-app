@@ -21,9 +21,19 @@ HTTP y reciben los cambios por socket. Ya no queda nada simulado.
 
 ## Arrancar
 
+Requisitos: Node 22 o más, pnpm 10 (`npm install -g pnpm@10.28.2`) y Docker
+(en Windows, Docker Desktop con WSL 2).
+
 ```bash
 pnpm install
+cp apps/api/.env.example apps/api/.env   # PowerShell: Copy-Item apps\api\.env.example apps\api\.env
 ```
+
+La API lee `apps/api/.env` sola al arrancar; en el VPS manda el entorno de
+Dokploy. `@tax/shared` se compila a `dist/` y la API la importa de ahí:
+`pnpm dev`, `pnpm dev:api` y `pnpm typecheck` lo hacen primero
+(`pnpm build:shared`), y quien use otro comando en un clon limpio tiene que
+correrlo antes.
 
 Primero la base y la API, que es de quien viven las interfaces:
 
@@ -37,7 +47,8 @@ prefijo de claves. El `seed` imprime una clave de API para n8n y crea un
 usuario de oficina y cinco conductores de prueba; detalles en
 [apps/api/README.md](apps/api/README.md).
 
-El mapa de Sogamoso es un archivo estático que se genera una vez:
+El mapa de Sogamoso (`apps/admin/public/tiles/sogamoso.pmtiles`) ya viene en
+el repositorio. Para regenerarlo desde OpenStreetMap:
 
 ```bash
 pnpm build:tiles

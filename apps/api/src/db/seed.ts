@@ -28,6 +28,17 @@ async function main(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error('Falta DATABASE_URL');
 
+  /*
+   * Nunca en producción (25/11/2026): deja un PIN y una contraseña conocidos,
+   * y quien entrara primero con ellos podría dar de alta su propio segundo
+   * factor. Para producción está `cli/sembrar-produccion.ts`.
+   */
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'El seed de desarrollo no se corre con NODE_ENV=production: usa cli/sembrar-produccion.ts',
+    );
+  }
+
   const pool = new Pool({ connectionString: url, max: 2 });
   const db = drizzle(pool, { schema, casing: 'snake_case' });
 
@@ -75,7 +86,7 @@ async function main(): Promise<void> {
     .insert(schema.users)
     .values({
       id: uuidv7(),
-      email: 'operadora@taxturistico.local',
+      email: 'operadora@sogataxi.local',
       name: 'Marcela Ruiz',
       passwordHash: await hashSecret('desarrollo-no-usar-en-produccion'),
       role: 'operador',

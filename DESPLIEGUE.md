@@ -765,3 +765,59 @@ cópialo directo a las credenciales de n8n.
   `--frozen-lockfile` del Dockerfile rechaza el despliegue.
 - **Borra `apps/api/.env.produccion.local`** de tu máquina cuando los secretos
   estén en Dokploy y en el gestor de contraseñas de la empresa.
+
+## 5. Respaldo diario de la base
+
+Los snapshots del proveedor viven en el mismo sitio que el servidor: si se
+pierde la cuenta o la máquina, se pierden con ella. `scripts/respaldo.sh`
+saca una copia completa, comprueba que se puede leer, la cifra y la sube a
+un almacenamiento fuera del servidor.
+
+1. Instalar en el VPS `rclone` y `gpg`, y configurar un destino de rclone
+   (`rclone config`) en otro proveedor: Backblaze B2, Cloudflare R2 o
+   similar.
+2. Guardar las variables en un archivo que solo lea root, por ejemplo
+   `/etc/sogataxi-respaldo.env`:
+
+   ```
+   DATABASE_URL=postgres://usuario:clave@127.0.0.1:5432/base
+   RESPALDO_DIR=/var/respaldos/sogataxi
+   RESPALDO_REMOTO=b2:sogataxi-respaldos
+   RESPALDO_CLAVE=una-frase-larga-guardada-fuera-del-servidor
+   PG_DUMP=docker exec -i <contenedor-de-postgres> pg_dump
+   PG_RESTORE=docker exec -i <contenedor-de-postgres> pg_restore
+   ```
+
+3. Programarlo de madrugada (`crontab -e` de root), después de la purga de
+   posiciones de las 4:00:
+
+   ```
+   30 4 * * * set -a; . /etc/sogataxi-respaldo.env; set +a; /ruta/al/repo/scripts/respaldo.sh >> /var/log/sogataxi-respaldo.log 2>&1
+   ```
+
+4. **Probar la restauración una vez**, en una base vacía, antes de fiarse:
+
+   ```
+   gpg -d sogataxi-AAAAMMDD-HHMM.dump.gpg > copia.dump
+   pg_restore --no-owner -d postgres://.../base_de_prueba copia.dump
+   ```
+
+La frase de `RESPALDO_CLAVE` tiene que estar guardada también fuera del
+servidor: sin ella las copias cifradas no se pueden abrir.
+
+Comprobado en desarrollo: la copia, la lectura y la restauración en una base
+vacía (mismos conductores, carreras y posiciones). El cifrado con gpg y la
+subida con rclone no se han probado aquí.
+
+## 6. La app Android del conductor
+
+- Firma y publicación de versiones: `apps/conductor-android/README.md`.
+- En el entorno de la API (`tax-api`), al publicar un APK:
+
+  ```
+  APP_ANDROID_VERSION_CODE=3
+  APP_ANDROID_VERSION_NAME=0.3.0
+  APP_ANDROID_URL=https://conductor.tu-dominio/sogataxi-conductor.apk
+  ```
+
+  En producción el enlace tiene que ser HTTPS o la API no arranca.

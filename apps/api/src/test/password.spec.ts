@@ -10,7 +10,7 @@ import { PASSWORD_MIN_LENGTH, evaluatePassword } from '@tax/shared';
  * siempre—, no la falta de un carácter raro.
  */
 
-const PERSONA = { email: 'marcela.ruiz@taxturistico.co', name: 'Marcela Ruiz' };
+const PERSONA = { email: 'marcela.ruiz@example.com', name: 'Marcela Ruiz' };
 
 describe('longitud', () => {
   it(`exige al menos ${PASSWORD_MIN_LENGTH} caracteres`, () => {

@@ -26,8 +26,8 @@ import { base32Decode, totp } from '../common/totp';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
-const ADMIN = { email: 'prueba-datos@taxturistico.local', pass: 'clave-de-prueba-suficientemente-larga' };
-const CENTRO = { lat: 5.78034, lng: -73.11421 };
+const ADMIN = { email: 'prueba-datos@sogataxi.local', pass: 'clave-de-prueba-suficientemente-larga' };
+const CENTRO = { lat: 5.71484, lng: -72.92791 };
 
 let fallos = 0;
 function assert(condicion: boolean, mensaje: string, contexto?: unknown): void {
@@ -187,7 +187,7 @@ async function main() {
       const filas = (await pool.query('select pickup_text, pickup_reference, dropoff_text, notes, pickup_lat, status, zone_id from rides where customer_id = $1', [id])).rows;
       assert(filas.length === 3 && filas.every((f) => f.pickup_text === '[suprimido]' && f.pickup_reference === null && f.dropoff_text === null && f.notes === null),
         'las carreras quedan sin direcciones ni notas', filas);
-      assert(filas.every((f) => f.status === 'CANCELLED' && f.zone_id !== null && Math.abs(f.pickup_lat - 5.78) < 1e-9), 'pero siguen en las cifras, con la recogida redondeada a ~1 km');
+      assert(filas.every((f) => f.status === 'CANCELLED' && f.zone_id !== null && Math.abs(f.pickup_lat - Math.round(CENTRO.lat * 100) / 100) < 1e-9), 'pero siguen en las cifras, con la recogida redondeada a ~1 km');
       const llaves = (await pool.query(`select count(*)::int n from idempotency_keys where response_body::text like $1`, [`%${telefono}%`])).rows[0].n;
       assert(llaves === 0, 'no quedan respuestas guardadas con su teléfono');
       const otraVez = await admin(`/v1/admin/customers/${id}/suprimir`, { method: 'POST', body: { motivo: 'Otra vez' } });

@@ -27,7 +27,7 @@ import { base32Decode, totp } from '../common/totp';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const CLAVE = 'clave-de-prueba-suficientemente-larga';
-const ADMIN = 'prueba-alta-admin@taxturistico.local';
+const ADMIN = 'prueba-alta-admin@sogataxi.local';
 const PREFIJO = 'prueba-alta';
 const MAXIMO = Number(process.env.MAX_OPERADORES ?? 5);
 
@@ -222,7 +222,7 @@ async function main(): Promise<void> {
 
     const b = (await admin.call('/v1/admin/users', {
       method: 'POST',
-      body: { name: 'Beto Prueba', login: `${PREFIJO}-beto@taxturistico.local` },
+      body: { name: 'Beto Prueba', login: `${PREFIJO}-beto@sogataxi.local` },
     })).body as Creado;
     assert(Boolean(b.password), 'también se puede crear con un correo');
     await db

@@ -25,8 +25,8 @@ import { base32Decode, totp } from '../common/totp';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const CLAVE = 'clave-de-prueba-suficientemente-larga';
-const ADMIN = 'prueba-roles-admin@taxturistico.local';
-const OPERADOR = 'prueba-roles-oper@taxturistico.local';
+const ADMIN = 'prueba-roles-admin@sogataxi.local';
+const OPERADOR = 'prueba-roles-oper@sogataxi.local';
 const PREFIJO = 'prueba-roles';
 const ROL = 'supervisor-prueba';
 

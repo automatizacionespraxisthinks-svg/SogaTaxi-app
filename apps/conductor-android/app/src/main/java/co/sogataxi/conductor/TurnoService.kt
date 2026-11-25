@@ -7,7 +7,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.location.Location
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
@@ -24,15 +23,6 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import io.socket.client.IO
 import io.socket.client.Socket
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import org.json.JSONObject
 
 /**
  * El turno abierto, como servicio en primer plano de tipo `location`.
@@ -42,64 +32,127 @@ import org.json.JSONObject
  * sigue abierto para que las ofertas lleguen al instante. A cambio, una
  * notificación fija dice "En turno" (Android la exige y el conductor la ve).
  *
+ * Qué se hace con el GPS y con el socket lo decide el motor común
+ * (`MotorDeTurno`, el mismo del iPhone). Este servicio le presta lo que es de
+ * Android: el primer plano, el GPS de Google Play, el socket y el candado de
+ * CPU.
+ *
  * Se inicia SOLO desde la app en pantalla (al abrir turno o al abrir la app
  * con el turno ya abierto): así basta el permiso de ubicación "mientras se
  * usa la app". Si Android mata el proceso y lo revive solo (START_STICKY),
- * arranca en segundo plano y puede quedarse sin ubicación: la fase 0 mide si
- * eso pasa en cada marca de teléfono.
+ * arranca en segundo plano y puede quedarse sin ubicación: el motor avisa al
+ * conductor si pasan dos minutos sin una lectura.
  */
-class TurnoService : Service() {
-    private val escena = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+class TurnoService : Service(), AnfitrionDeTurno {
     private val ubicacion by lazy { LocationServices.getFusedLocationProviderClient(this) }
-    private var socket: Socket? = null
+    private val motor = MotorDeTurno(this)
     private var candado: PowerManager.WakeLock? = null
-    private var activo = false
-    private var latido: Job? = null
+    private var redRegistrada = false
 
     /** Al volver la red (wifi o datos), se reenvía la cola sin esperar al socket. */
     private val alVolverLaRed = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) {
-            Diagnostico.evento("Volvió la red")
-            escena.launch {
-                Cola.vaciar()
-                Sesion.refrescar()
-            }
+        override fun onAvailable(network: Network) = motor.volvioLaRed()
+    }
+
+    private val alLeer = object : LocationCallback() {
+        override fun onLocationResult(resultado: LocationResult) {
+            val punto = resultado.lastLocation ?: return
+            motor.lectura(
+                Lectura(punto.latitude, punto.longitude, if (punto.hasAccuracy()) punto.accuracy else null),
+            )
         }
     }
 
-    /** Segundos entre envíos, en carrera y en espera; los dicta la API (`rules.positionSeconds`). */
-    private var cadenciaCarrera = 2
-    private var cadenciaEspera = 2
-    private var ultimoEnvio = 0L
+    /* ----------------------------------------- lo que Android le presta al motor */
+
+    override val gps = object : Gps {
+        @SuppressLint("MissingPermission")
+        override fun configurar(modo: ModoGps, intervaloMs: Long): Boolean {
+            val permiso = ContextCompat.checkSelfPermission(
+                this@TurnoService, android.Manifest.permission.ACCESS_FINE_LOCATION,
+            )
+            if (permiso != android.content.pm.PackageManager.PERMISSION_GRANTED) return false
+            val prioridad = if (modo == ModoGps.PAUSA) {
+                Priority.PRIORITY_BALANCED_POWER_ACCURACY
+            } else {
+                Priority.PRIORITY_HIGH_ACCURACY
+            }
+            val pedido = LocationRequest.Builder(prioridad, intervaloMs)
+                .setMinUpdateIntervalMillis(intervaloMs)
+                .setWaitForAccurateLocation(false)
+                .build()
+            ubicacion.removeLocationUpdates(alLeer)
+            ubicacion.requestLocationUpdates(pedido, alLeer, Looper.getMainLooper())
+            return true
+        }
+
+        override fun detener() {
+            runCatching { ubicacion.removeLocationUpdates(alLeer) }
+        }
+    }
+
+    override val tiempoReal = object : TiempoReal {
+        private var socket: Socket? = null
+
+        override fun conectar(url: String, token: String, eventos: List<String>, oyente: OyenteTiempoReal) {
+            desconectar()
+            val opciones = IO.Options().apply {
+                auth = mapOf("token" to token)
+                reconnection = true
+                reconnectionDelay = 1_000
+                reconnectionDelayMax = 10_000
+            }
+            socket = IO.socket(url, opciones).apply {
+                on(Socket.EVENT_CONNECT) { oyente.conectado() }
+                on(Socket.EVENT_DISCONNECT) { oyente.desconectado() }
+                on(Socket.EVENT_CONNECT_ERROR) { oyente.desconectado() }
+                eventos.forEach { nombre ->
+                    on(nombre) { args -> oyente.evento(nombre, args.firstOrNull()?.toString()) }
+                }
+                connect()
+            }
+        }
+
+        override fun desconectar() {
+            socket?.off()
+            socket?.disconnect()
+            socket = null
+        }
+    }
+
+    override fun pantallaEncendida(): Boolean = getSystemService(PowerManager::class.java).isInteractive
+
+    /** Cada 20 s: el candado se renueva antes de que venza su tope. */
+    override fun latido() {
+        candado?.acquire(TOPE_CANDADO_MS)
+    }
+
+    /** El motor ya soltó el GPS y el socket: se suelta lo de Android. */
+    override fun alDetener() {
+        soltar()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    /* -------------------------------------------------------------- servicio */
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == DETENER) {
-            detener()
+            motor.detener()
             return START_NOT_STICKY
         }
         if (Prefs.token == null) {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (!activo && !entrarEnPrimerPlano()) return START_NOT_STICKY
-        if (!activo) {
-            activo = true
-            Diagnostico.turnoIniciado()
-            Diagnostico.evento(if (intent == null) "Servicio revivido por Android" else "Servicio de turno iniciado")
+        if (!motor.activo && !entrarEnPrimerPlano()) return START_NOT_STICKY
+        if (!motor.activo) {
             tomarCandado()
-            leerReglas()
-            iniciarGps()
-            conectarSocket()
+            motor.iniciar(revivido = intent == null)
             getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(alVolverLaRed)
-            // Respaldo: cada 20 s, si quedó algo en la cola, se intenta otra vez.
-            latido = escena.launch {
-                while (isActive) {
-                    delay(20_000)
-                    if (Cola.hayDelConductor()) Cola.vaciar()
-                }
-            }
+            redRegistrada = true
         }
         return START_STICKY
     }
@@ -114,6 +167,11 @@ class TurnoService : Service() {
         // Android 12+ no deja iniciar un servicio de ubicación desde segundo
         // plano. Pasa si Android revive el servicio con la app cerrada.
         Diagnostico.evento("No pudo entrar en primer plano: ${e.javaClass.simpleName}")
+        // Sin esto el turno quedaba "zombi": la cabecera seguía en "En vivo",
+        // al volver a la app no se reiniciaba el servicio, y el conductor no
+        // sabía que había dejado de recibir ofertas.
+        Diagnostico.turnoTerminado()
+        Avisos.turnoInterrumpido()
         stopSelf()
         false
     }
@@ -136,164 +194,35 @@ class TurnoService : Service() {
     /**
      * Un candado parcial: la CPU no se duerme con la pantalla apagada, así el
      * socket responde a los latidos y el envío de posiciones no se congela.
-     * Cuesta batería; la fase 0 mide cuánta.
+     * Cuesta batería; el piloto mide cuánta.
+     *
+     * Con tope: si algo fallara y el servicio no lo soltara, la CPU no queda
+     * despierta para siempre. El latido de 20 s lo renueva mientras el turno
+     * siga vivo.
      */
-    @SuppressLint("WakelockTimeout")
     private fun tomarCandado() {
         candado = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SogaTaxi:turno")
-            .apply { acquire() }
+            .apply {
+                setReferenceCounted(false)
+                acquire(TOPE_CANDADO_MS)
+            }
     }
 
-    private fun leerReglas() = escena.launch {
-        runCatching {
-            val yo = Api.get("/v1/driver/rides/me") as? JSONObject
-            yo?.optJSONObject("rules")?.optJSONObject("positionSeconds")?.let {
-                cadenciaCarrera = it.optInt("ride", cadenciaCarrera)
-                cadenciaEspera = it.optInt("idle", cadenciaEspera)
-            }
-            Diagnostico.evento("Cadencia: $cadenciaEspera s en espera, $cadenciaCarrera s en carrera")
-        }.onFailure { Diagnostico.evento("No se leyeron las reglas: ${it.message}") }
-    }
-
-    private val alLeer = object : LocationCallback() {
-        override fun onLocationResult(resultado: LocationResult) {
-            val punto = resultado.lastLocation ?: return
-            val pantalla = getSystemService(PowerManager::class.java).isInteractive
-            Diagnostico.lectura(if (punto.hasAccuracy()) punto.accuracy else null, pantalla)
-            ultimaPosicion = punto.latitude to punto.longitude
-
-            // Distancia a la recogida mientras va por el cliente: la pantalla
-            // dice cuánto falta y si ya puede marcar "Llegué".
-            val sesion = Sesion.flujo.value
-            val carrera = sesion.carrera
-            if (sesion.fase == Fase.CARRERA && sesion.estadoCarrera == EstadoCarrera.ASSIGNED && carrera?.tienePunto == true) {
-                val metros = FloatArray(1)
-                Location.distanceBetween(punto.latitude, punto.longitude, carrera.lat!!, carrera.lng!!, metros)
-                Sesion.acercarse(metros[0])
-            }
-
-            val rideId = Sesion.carreraEnCurso
-            val cadencia = (if (rideId != null) cadenciaCarrera else cadenciaEspera) * 1000L
-            if (System.currentTimeMillis() - ultimoEnvio < cadencia) return
-            ultimoEnvio = System.currentTimeMillis()
-
-            val cuerpo = JSONObject()
-                .put("point", JSONObject().put("lat", punto.latitude).put("lng", punto.longitude))
-                .apply {
-                    if (punto.hasAccuracy()) put("accuracyMeters", punto.accuracy.toInt().coerceIn(0, 5000))
-                    rideId?.let { put("rideId", it) }
-                }
-            escena.launch {
-                // Una posición perdida no se reintenta: la siguiente llega en
-                // segundos y vale más (igual que la PWA). La cola de posiciones
-                // sin señal es de la fase 2.
-                val ok = runCatching { Api.post("/v1/driver/position", cuerpo) }.isSuccess
-                Diagnostico.envio(ok)
-            }
+    private fun soltar() {
+        if (redRegistrada) {
+            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(alVolverLaRed) }
+            redRegistrada = false
         }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun iniciarGps() {
-        val permiso = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
-        if (permiso != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            Diagnostico.evento("Sin permiso de ubicación: no se envía el GPS")
-            return
-        }
-        // Una lectura por segundo como máximo; el envío lo espacia la cadencia.
-        val pedido = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1_000)
-            .setMinUpdateIntervalMillis(1_000)
-            .setWaitForAccurateLocation(false)
-            .build()
-        ubicacion.requestLocationUpdates(pedido, alLeer, Looper.getMainLooper())
-    }
-
-    private fun conectarSocket() {
-        val token = Prefs.token ?: return
-        val opciones = IO.Options().apply {
-            auth = mapOf("token" to token)
-            reconnection = true
-            reconnectionDelay = 1_000
-            reconnectionDelayMax = 10_000
-        }
-        socket = IO.socket("${Prefs.apiBase}/rt", opciones).apply {
-            on(Socket.EVENT_CONNECT) {
-                Diagnostico.socket(true)
-                // Al reconectar: lo que quedó en la cola y el estado real.
-                escena.launch {
-                    Sesion.enLinea(true)
-                    Cola.vaciar()
-                    Sesion.refrescar()
-                }
-            }
-            on(Socket.EVENT_DISCONNECT) {
-                Diagnostico.socket(false)
-                escena.launch { Sesion.enLinea(false) }
-            }
-            on(Socket.EVENT_CONNECT_ERROR) {
-                Diagnostico.socket(false)
-                escena.launch { Sesion.enLinea(false) }
-            }
-            // La oficina cambió algo de su carrera (la canceló, corrigió la
-            // dirección, la reasignó): se pide el estado real.
-            on("ride:changed") { escena.launch { Sesion.refrescar() } }
-            on("ride:offer") { args ->
-                val json = args.firstOrNull() as? JSONObject ?: return@on
-                val oferta = runCatching { OfertaDeCarrera.deJson(json) }.getOrNull() ?: return@on
-                escena.launch { Ofertas.mostrar(this@TurnoService, oferta) }
-            }
-            on("ride:offer_revoked") { args ->
-                val rideId = (args.firstOrNull() as? JSONObject)?.optString("rideId") ?: return@on
-                escena.launch { Ofertas.retirar(this@TurnoService, rideId, "La oficina retiró la oferta") }
-            }
-            on("shift:closed") { args ->
-                val motivo = (args.firstOrNull() as? JSONObject)?.optString("motivo").orEmpty()
-                escena.launch {
-                    Diagnostico.evento("La oficina cerró el turno $motivo")
-                    Sesion.avisar("La oficina cerró tu turno. $motivo".trim())
-                    Sesion.refrescar()
-                    detener()
-                }
-            }
-            on("session:closed") {
-                escena.launch {
-                    Diagnostico.evento("Sesión cerrada desde otro celular o la oficina")
-                    Sesion.sesionCerrada("Tu sesión se cerró: entraste en otro celular o la oficina la cerró.")
-                    detener()
-                }
-            }
-            connect()
-        }
-    }
-
-    private fun detener() {
-        if (activo) Diagnostico.evento("Servicio de turno detenido")
-        activo = false
-        latido?.cancel()
-        runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(alVolverLaRed) }
-        ubicacion.removeLocationUpdates(alLeer)
-        socket?.off()
-        socket?.disconnect()
-        socket = null
         candado?.takeIf { it.isHeld }?.release()
         candado = null
-        Diagnostico.turnoTerminado()
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
 
     override fun onDestroy() {
-        if (activo) {
-            // Android lo está matando sin que el conductor cerrara el turno.
-            Diagnostico.evento("Android detuvo el servicio")
-            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(alVolverLaRed) }
-            ubicacion.removeLocationUpdates(alLeer)
-            socket?.off()
-            socket?.disconnect()
-            candado?.takeIf { it.isHeld }?.release()
-        }
-        escena.cancel()
+        // Si seguía activo, Android lo está matando sin que el conductor
+        // cerrara el turno: el motor se lo avisa. El GPS se apaga siempre.
+        motor.destruir()
+        soltar()
         super.onDestroy()
     }
 
@@ -301,9 +230,8 @@ class TurnoService : Service() {
         private const val NOTIFICACION = 1
         private const val DETENER = "co.sogataxi.conductor.DETENER"
 
-        /** La última posición leída, para las etapas de la carrera (`at`). */
-        @Volatile
-        var ultimaPosicion: Pair<Double, Double>? = null
+        /** Tope del candado de CPU; el latido lo renueva cada 20 s. */
+        private const val TOPE_CANDADO_MS = 10 * 60_000L
 
         /** Solo desde la app en pantalla: ver la nota de la clase. */
         fun iniciar(context: Context) {

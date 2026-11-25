@@ -553,24 +553,37 @@ export class IdentityService {
     const expiresAt = new Date(Date.now() + env.SESSION_TTL_HOURS * 3600_000);
 
     await this.db.transaction(async (tx) => {
-      await tx
+      /*
+       * Quemar el código va en la misma transacción que abrir la sesión y
+       * con una condición (25/11/2026). Antes se escribía sin mirar: dos
+       * accesos a la vez con el mismo código pasaban los dos la comprobación
+       * de arriba y los dos entraban. Ahora solo uno encuentra el contador
+       * todavía por debajo (o el código de respaldo todavía sin usar); el
+       * otro no cambia ninguna fila y se rechaza.
+       */
+      const actualizado = await tx
         .update(users)
         .set({
           failedAttempts: 0,
           lockedUntil: null,
           lastLoginAt: new Date(),
-          // Quemar el intervalo va en la misma transacción que abrir la
-          // sesión: si se hiciera después, dos accesos a la vez con el mismo
-          // código entrarían los dos.
           ...(usedCounter != null ? { totpLastCounter: usedCounter } : {}),
         })
-        .where(eq(users.id, user.id));
+        .where(
+          usedCounter != null
+            ? and(eq(users.id, user.id), or(isNull(users.totpLastCounter), lt(users.totpLastCounter, usedCounter)))
+            : eq(users.id, user.id),
+        )
+        .returning({ id: users.id });
+      if (actualizado.length === 0) throw new AppError('TOTP_INVALID', 'Código incorrecto o ya usado');
 
       if (usedRecoveryCodeId) {
-        await tx
+        const gastado = await tx
           .update(userRecoveryCodes)
           .set({ usedAt: new Date() })
-          .where(eq(userRecoveryCodes.id, usedRecoveryCodeId));
+          .where(and(eq(userRecoveryCodes.id, usedRecoveryCodeId), isNull(userRecoveryCodes.usedAt)))
+          .returning({ id: userRecoveryCodes.id });
+        if (gastado.length === 0) throw new AppError('TOTP_INVALID', 'Código incorrecto o ya usado');
       }
 
       await tx.insert(sessions).values({

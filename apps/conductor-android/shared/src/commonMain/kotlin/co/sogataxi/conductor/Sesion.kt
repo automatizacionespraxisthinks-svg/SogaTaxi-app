@@ -1,6 +1,5 @@
 package co.sogataxi.conductor
 
-import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -10,8 +9,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.json.JSONObject
-import java.time.Instant
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlin.math.roundToInt
 
 /**
  * La sesión del conductor: en qué pantalla está y con qué carrera.
@@ -26,16 +27,16 @@ object Sesion {
 
     private val escena = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val refrescando = Mutex()
-    private lateinit var appContext: Context
 
     /** Al abrir la app: lo último que se supo, si hay sesión. */
-    fun iniciar(context: Context) {
-        appContext = context.applicationContext
+    fun iniciar() {
         if (Prefs.token == null) {
             estado.value = EstadoSesion(fase = Fase.ACCESO)
             return
         }
-        val guardado = Prefs.ultimoEstado?.let { runCatching { EstadoSesion.deJson(JSONObject(it)) }.getOrNull() }
+        val guardado = Prefs.ultimoEstado?.let {
+            runCatching { EstadoSesion.deJson(analizarJson(it) as JsonObject) }.getOrNull()
+        }
         estado.value = (guardado ?: EstadoSesion(fase = Fase.FUERA_DE_TURNO))
             .copy(enLinea = false, encoladas = Cola.pendientes().size)
     }
@@ -52,7 +53,7 @@ object Sesion {
 
     /** De diez en diez metros: pintar la pantalla por un metro no le dice nada al conductor. */
     fun acercarse(metros: Float) {
-        val redondo = (Math.round(metros.coerceAtLeast(0f) / 10f) * 10)
+        val redondo = (metros.coerceAtLeast(0f) / 10f).roundToInt() * 10
         if (redondo != estado.value.metrosALaRecogida) cambiar { it.copy(metrosALaRecogida = redondo) }
     }
 
@@ -71,7 +72,12 @@ object Sesion {
     suspend fun refrescar() = refrescando.withLock {
         if (Prefs.token == null) return@withLock
         val yo = try {
-            Api.get("/v1/driver/rides/me") as JSONObject
+            // `as?`: un 200 con el cuerpo vacío o que no es JSON (un proxy a
+            // medio desplegar) se trata como sin señal, no tumba la app.
+            Api.get("/v1/driver/rides/me") as? JsonObject ?: run {
+                enLinea(false)
+                return@withLock
+            }
         } catch (e: ApiError) {
             if (e.status == 401) {
                 /*
@@ -92,31 +98,31 @@ object Sesion {
             return@withLock
         }
 
-        val reglas = yo.optJSONObject("rules")
-        val turno = yo.optJSONObject("shift")
-        val totales = yo.optJSONObject("totals")
-        val activa = yo.optJSONObject("activeRide")
-        val pendiente = yo.optJSONObject("pendingOffer")
-        val turnoDesde = turno?.optString("startedAt")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
-        turno?.optString("plate")?.takeIf { it.isNotBlank() }?.let { Prefs.placa = it }
-        yo.optJSONObject("driver")?.let {
-            Prefs.conductor = it.optString("name")
-            Prefs.codigo = it.optString("code")
+        val reglas = yo.objeto("rules")
+        val turno = yo.objeto("shift")
+        val totales = yo.objeto("totals")
+        val activa = yo.objeto("activeRide")
+        val pendiente = yo.objeto("pendingOffer")
+        val turnoDesde = instanteMs(turno?.texto("startedAt"))
+        turno?.texto("plate")?.let { Prefs.placa = it }
+        yo.objeto("driver")?.let { conductor ->
+            conductor.texto("name")?.let { Prefs.conductor = it }
+            conductor.texto("code")?.let { Prefs.codigo = it }
         }
 
         val fase = when {
             activa != null -> Fase.CARRERA
-            turno != null -> if (turno.optBoolean("paused")) Fase.PAUSA else Fase.DISPONIBLE
+            turno != null -> if (turno.booleano("paused")) Fase.PAUSA else Fase.DISPONIBLE
             else -> Fase.FUERA_DE_TURNO
         }
 
         cambiar { antes ->
             val base = antes.copy(
                 turnoDesde = turnoDesde,
-                placa = turno?.optString("plate") ?: antes.placa,
-                carrerasHoy = totales?.optInt("rides", antes.carrerasHoy) ?: antes.carrerasHoy,
-                minutosMinimos = reglas?.optInt("minRideMinutes") ?: antes.minutosMinimos,
-                radioLlegada = reglas?.optInt("arrivalRadiusMeters", antes.radioLlegada) ?: antes.radioLlegada,
+                placa = turno?.texto("plate") ?: antes.placa,
+                carrerasHoy = totales?.entero("rides") ?: antes.carrerasHoy,
+                minutosMinimos = reglas?.entero("minRideMinutes") ?: antes.minutosMinimos,
+                radioLlegada = reglas?.entero("arrivalRadiusMeters") ?: antes.radioLlegada,
                 enLinea = true,
                 // Un aviso de "sin sesión" ya no aplica si la API contestó.
                 aviso = antes.aviso?.takeUnless { antes.fase == Fase.ACCESO },
@@ -129,7 +135,7 @@ object Sesion {
             if (antes.fase == Fase.RESUMEN && fase != Fase.CARRERA) return@cambiar base
             if (activa != null) {
                 val carrera = Carrera.deJson(activa)
-                val estadoCarrera = runCatching { EstadoCarrera.valueOf(activa.optString("status")) }
+                val estadoCarrera = runCatching { EstadoCarrera.valueOf(activa.texto("status")!!) }
                     .getOrDefault(EstadoCarrera.ASSIGNED)
                 base.copy(
                     fase = Fase.CARRERA,
@@ -147,21 +153,20 @@ object Sesion {
 
         // Una oferta viva que el conductor no vio porque estaba sin cobertura.
         if (activa == null && pendiente != null && Ofertas.flujo.value == null) {
-            val carrera = pendiente.optJSONObject("ride")
-            if (carrera != null) {
+            val carrera = pendiente.objeto("ride")
+            val rideId = carrera?.texto("id")
+            if (carrera != null && rideId != null) {
                 Ofertas.mostrar(
-                    appContext,
                     OfertaDeCarrera(
-                        rideId = carrera.getString("id"),
-                        codigo = carrera.optString("code"),
-                        recogida = carrera.optString("pickupText"),
-                        referencia = carrera.optString("pickupReference").takeIf { it.isNotBlank() && it != "null" },
-                        pagoElectronico = carrera.optBoolean("pagoElectronico"),
-                        pasajeros = carrera.optInt("passengers", 1),
-                        distanciaKm = pendiente.optDouble("distanceKm", 0.0),
-                        etaMin = pendiente.optInt("etaMinutes"),
-                        venceEn = runCatching { Instant.parse(pendiente.getString("expiresAt")).toEpochMilli() }
-                            .getOrElse { System.currentTimeMillis() + 30_000 },
+                        rideId = rideId,
+                        codigo = carrera.texto("code").orEmpty(),
+                        recogida = carrera.texto("pickupText").orEmpty(),
+                        referencia = carrera.texto("pickupReference"),
+                        pagoElectronico = carrera.booleano("pagoElectronico"),
+                        pasajeros = carrera.entero("passengers") ?: 1,
+                        distanciaKm = pendiente.doble("distanceKm") ?: 0.0,
+                        etaMin = pendiente.entero("etaMinutes") ?: 0,
+                        venceEn = instanteMs(pendiente.texto("expiresAt")) ?: (ahoraMs() + 30_000),
                     ),
                 )
             }
@@ -171,14 +176,16 @@ object Sesion {
     /* ------------------------------------------------------------ acciones */
 
     suspend fun entrar(codigo: String, pin: String, dispositivo: String): String? = try {
-        val cuerpo = JSONObject()
-            .put("code", codigo).put("pin", pin)
-            .put("device", dispositivo.take(120))
-            .put("install", Prefs.installId)
-        val respuesta = Api.post("/v1/auth/driver", cuerpo) as JSONObject
-        Prefs.token = respuesta.getString("token")
+        val cuerpo = buildJsonObject {
+            put("code", codigo)
+            put("pin", pin)
+            put("device", dispositivo.take(120))
+            put("install", Prefs.installId)
+        }
+        val respuesta = Api.post("/v1/auth/driver", cuerpo) as JsonObject
+        Prefs.token = respuesta.texto("token") ?: error("La oficina no devolvió la sesión")
         Prefs.codigo = codigo
-        Prefs.conductor = respuesta.getJSONObject("driver").optString("name")
+        Prefs.conductor = respuesta.objeto("driver")?.texto("name").orEmpty()
         cambiar { EstadoSesion(fase = Fase.FUERA_DE_TURNO, placa = Prefs.placa) }
         refrescar()
         null
@@ -188,7 +195,7 @@ object Sesion {
 
     /** Abrir turno va directo: sin señal se le dice y lo intenta de nuevo. */
     suspend fun abrirTurno(placa: String): String? = try {
-        Api.post("/v1/driver/shift/open", JSONObject().put("plate", placa))
+        Api.post("/v1/driver/shift/open", buildJsonObject { put("plate", placa) })
         Prefs.placa = placa
         Diagnostico.turnoIniciado()
         refrescar()
@@ -221,13 +228,18 @@ object Sesion {
         e.message
     }
 
+    private fun dondeEstoy(): JsonObject? = Posicion.ultima?.let { (lat, lng) ->
+        buildJsonObject {
+            put("lat", lat)
+            put("lng", lng)
+        }
+    }
+
     /** Una etapa de la carrera: la pantalla avanza ya y la acción va por la cola. */
     fun etapa(cual: Etapa) {
         val actual = estado.value
         val carrera = actual.carrera ?: return
-        val cuerpo = JSONObject().apply {
-            TurnoService.ultimaPosicion?.let { (lat, lng) -> put("at", JSONObject().put("lat", lat).put("lng", lng)) }
-        }
+        val cuerpo = buildJsonObject { si("at", dondeEstoy()) }
         Cola.encolar("/v1/driver/rides/${carrera.rideId}/${cual.ruta}", cuerpo, cual.nombre)
         Diagnostico.evento("Etapa: ${cual.nombre}${if (actual.enLinea) "" else " (guardada sin señal)"}")
         cambiar {
@@ -235,7 +247,7 @@ object Sesion {
                 Etapa.LLEGUE -> it.copy(estadoCarrera = EstadoCarrera.DRIVER_ARRIVED)
                 Etapa.A_BORDO -> it.copy(
                     estadoCarrera = EstadoCarrera.IN_PROGRESS,
-                    carrera = carrera.copy(abordoDesde = carrera.abordoDesde ?: System.currentTimeMillis()),
+                    carrera = carrera.copy(abordoDesde = carrera.abordoDesde ?: ahoraMs()),
                 )
                 Etapa.FINALIZAR -> it.copy(fase = Fase.RESUMEN, carrerasHoy = it.carrerasHoy + 1)
             }
@@ -253,9 +265,10 @@ object Sesion {
     suspend fun cancelar(motivo: String, detalle: String?): String? {
         val carrera = estado.value.carrera ?: return "No hay carrera"
         return try {
-            val cuerpo = JSONObject().put("motivo", motivo).apply {
-                detalle?.takeIf { it.isNotBlank() }?.let { put("detalle", it.trim()) }
-                TurnoService.ultimaPosicion?.let { (lat, lng) -> put("at", JSONObject().put("lat", lat).put("lng", lng)) }
+            val cuerpo = buildJsonObject {
+                put("motivo", motivo)
+                si("detalle", detalle?.takeIf { it.isNotBlank() }?.trim())
+                si("at", dondeEstoy())
             }
             Api.post("/v1/driver/rides/${carrera.rideId}/cancel", cuerpo, idempotencia = Api.nuevaClave())
             Diagnostico.evento("Canceló la carrera ${carrera.codigo}")
@@ -269,8 +282,8 @@ object Sesion {
 
     /** Cambiar de carro: directo, cierra el turno del de antes y abre el nuevo. */
     suspend fun cambiarCarro(placa: String): String? = try {
-        val turno = Api.post("/v1/driver/shift/switch", JSONObject().put("plate", placa)) as? JSONObject
-        Prefs.placa = turno?.optString("plate") ?: placa
+        val turno = Api.post("/v1/driver/shift/switch", buildJsonObject { put("plate", placa) }) as? JsonObject
+        Prefs.placa = turno?.texto("plate") ?: placa
         refrescar()
         avisar("Listo: ahora vas en el ${Prefs.placa}.")
         null
@@ -301,10 +314,4 @@ object Sesion {
         Prefs.salir()
         cambiar { EstadoSesion(fase = Fase.ACCESO, aviso = motivo) }
     }
-}
-
-enum class Etapa(val ruta: String, val nombre: String) {
-    LLEGUE("arrived", "Llegué"),
-    A_BORDO("board", "Pasajero a bordo"),
-    FINALIZAR("finish", "Finalizar"),
 }

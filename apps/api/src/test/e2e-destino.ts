@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 import { haversineKm } from '@tax/shared';
+import { CENTRO } from './coordenadas';
 
 /**
  * El destino que se descubre al final.
@@ -53,9 +54,8 @@ async function pasarTiempoABordo(rideId: string): Promise<void> {
   ]);
 }
 
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 /** Unos 2 km al noreste, dentro de la zona Centro. */
-const DONDE_TERMINA = { lat: 5.7865, lng: -73.1075 };
+const DONDE_TERMINA = { lat: 5.7210, lng: -72.9212 };
 
 interface Json { [k: string]: unknown }
 
@@ -176,7 +176,7 @@ async function main(): Promise<void> {
   /* ------------------------------------------------------------------ 2 */
   console.log('\n2. Con destino dicho por el cliente: no se pisa');
   await call('/v1/driver/position', { method: 'POST', token, body: { point: CENTRO } });
-  const DESTINO_DICHO = { lat: 5.7836, lng: -73.1177 };
+  const DESTINO_DICHO = { lat: 5.7181, lng: -72.9314 };
   const r2 = await hastaABordo(token, { text: 'Terminal de transportes', point: DESTINO_DICHO });
 
   const fin2 = await call(`/v1/driver/rides/${r2}/finish`, { method: 'POST', token, body: { at: DONDE_TERMINA } });
@@ -222,7 +222,7 @@ async function main(): Promise<void> {
   console.log('\n4. GPS con lectura absurda: se descarta, pero cierra');
   await call('/v1/driver/position', { method: 'POST', token, body: { point: CENTRO } });
   const r4 = await hastaABordo(token);
-  // (0, 0) es el golfo de Guinea: once mil kilometros de Paipa.
+  // (0, 0) es el golfo de Guinea: once mil kilometros de Sogamoso.
   const fin4 = await call(`/v1/driver/rides/${r4}/finish`, { method: 'POST', token, body: { at: { lat: 0, lng: 0 } } });
   assert(fin4.status < 400, 'cierra aunque el GPS devuelva (0, 0)', fin4.body);
 

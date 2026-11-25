@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { Pool } from 'pg';
 import { uuidv7 } from 'uuidv7';
 import { hashSecret, randomHex, randomToken } from '../common/crypto';
+import { CENTRO } from './coordenadas';
 
 /**
  * Cuatro cambios en la carrera, comprobados contra la API de verdad:
@@ -21,6 +22,10 @@ import { hashSecret, randomHex, randomToken } from '../common/crypto';
  *     (`MIN_DURACION_CARRERA_MIN`), y el mensaje dice cuánto falta.
  *
  *   pnpm --filter @tax/api exec tsx src/test/e2e-ajustes-carrera.ts
+ *
+ * La foto se sirve desde 127.0.0.1, y la API no baja fotos de direcciones
+ * privadas salvo que estén en la lista: la API tiene que estar corriendo con
+ * `FOTO_HOSTS_PERMITIDOS=127.0.0.1` (solo en desarrollo).
  */
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
@@ -28,7 +33,6 @@ const CONDUCTOR = { code: '101', plate: 'UBP472' };
 const OTRO = { code: '102', plate: 'TQR118' };
 const APARTADOS = [OTRO, { code: '103', plate: 'SVM903' }];
 const PIN = '4821';
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 
 /** Una foto JPEG de un píxel: lo justo para que sea una imagen de verdad. */
 const JPEG = Buffer.from(

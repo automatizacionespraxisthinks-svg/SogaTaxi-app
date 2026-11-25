@@ -1,12 +1,5 @@
 package co.sogataxi.conductor
 
-import android.content.ActivityNotFoundException
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.widget.Toast
-import java.net.URLEncoder
-
 /**
  * "Ir con Maps" e "Ir con Waze", con los mismos enlaces que la PWA
  * (`apps/driver/src/components/IrConMapas.tsx`).
@@ -19,6 +12,9 @@ import java.net.URLEncoder
  *
  * Si el cliente compartió su ubicación, Maps abre el mismo enlace que él
  * mandó, con su pin; Waze va al mismo punto (Waze no abre enlaces de Google).
+ *
+ * Abrir el enlace o marcar el teléfono lo hace el sistema
+ * (`Plataforma.abrirEnlace`, `Plataforma.llamar`).
  */
 object Mapas {
     /** Lo mismo que le pone el geocodificador de la API a cada dirección. */
@@ -35,16 +31,38 @@ object Mapas {
         Regex("^(www\\.)?openstreetmap\\.org$"),
     )
 
-    private fun enlaceValido(enlace: String?): String? {
+    /** esquema://[usuario@]host[:puerto][ruta] */
+    private val PARTES = Regex("^(https?)://([^/?#]*)([^?#]*)")
+
+    internal fun enlaceValido(enlace: String?): String? {
         if (enlace.isNullOrBlank()) return null
-        val uri = runCatching { Uri.parse(enlace.trim()) }.getOrNull() ?: return null
-        if (uri.scheme != "https" && uri.scheme != "http") return null
-        val host = uri.host?.lowercase() ?: return null
+        val limpio = enlace.trim()
+        val partes = PARTES.find(limpio) ?: return null
+        val autoridad = partes.groupValues[2]
+        // Con usuario delante («https://google.com@malo.example»), el host es
+        // lo que va después de la arroba: eso es lo que se valida.
+        val host = autoridad.substringAfterLast('@').substringBefore(':').lowercase()
+        if (host.isEmpty()) return null
         if (HOSTS.none { it.matches(host) }) return null
-        val ruta = uri.path.orEmpty()
+        val ruta = partes.groupValues[3]
         if (Regex("^(www\\.)?google\\.").containsMatchIn(host) && !ruta.startsWith("/maps")) return null
         if (host == "goo.gl" && !ruta.startsWith("/maps")) return null
-        return enlace.trim()
+        return limpio
+    }
+
+    private const val HEX = "0123456789ABCDEF"
+
+    /** Como un formulario web: lo raro va en %XX (UTF-8) y el espacio es «+». */
+    internal fun codificar(texto: String): String = buildString {
+        for (byte in texto.encodeToByteArray()) {
+            val c = byte.toInt() and 0xFF
+            val letra = c.toChar()
+            when {
+                letra in 'a'..'z' || letra in 'A'..'Z' || letra in '0'..'9' || letra in "-_.*" -> append(letra)
+                c == 0x20 -> append('+')
+                else -> append('%').append(HEX[c shr 4]).append(HEX[c and 0x0F])
+            }
+        }
     }
 
     data class Enlaces(val maps: String, val waze: String)
@@ -59,29 +77,12 @@ object Mapas {
             )
         }
         if (carrera.recogida.isNotBlank()) {
-            val consulta = URLEncoder.encode("${carrera.recogida.trim()}, $CONTEXTO", "UTF-8")
+            val consulta = codificar("${carrera.recogida.trim()}, $CONTEXTO")
             return Enlaces(
                 maps = "https://www.google.com/maps/dir/?api=1&destination=$consulta&travelmode=driving",
                 waze = "https://waze.com/ul?q=$consulta&navigate=yes",
             )
         }
         return null
-    }
-
-    /**
-     * Abre la app de mapas si está instalada; si no, el navegador. La app de
-     * conductores sigue viva detrás: el turno es un servicio en primer plano.
-     */
-    fun abrir(context: Context, enlace: String) {
-        try {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(enlace)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        } catch (e: ActivityNotFoundException) {
-            Toast.makeText(context, "No hay una app para abrir el mapa", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /** Llamar al cliente: abre el marcador con el número, sin pedir permiso de llamadas. */
-    fun llamar(context: Context, telefono: String) {
-        context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$telefono")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 }

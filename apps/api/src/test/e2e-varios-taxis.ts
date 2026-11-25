@@ -16,7 +16,7 @@ import { Pool } from 'pg';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
-const TERMINAL = { lat: 5.7795, lng: -73.1148 };
+const TERMINAL = { lat: 5.7140, lng: -72.9285 };
 
 let fallos = 0;
 const creadas = new Set<string>();
@@ -179,7 +179,7 @@ async function main() {
     const tel = telefono();
     const k = base('mixto');
     const a = await crear(`${k}-1`, { ...taxi(tel, 1, 2), cantidad: 2 });
-    const b = await crear(`${k}-3`, { ...taxi(tel, 3, 3, 3), pickup: { text: 'Hotel Sochagota', point: { lat: 5.7712, lng: -73.1105 } } });
+    const b = await crear(`${k}-3`, { ...taxi(tel, 3, 3, 3), pickup: { text: 'Hotel Sochagota', point: { lat: 5.7057, lng: -72.9242 } } });
     ((a.body as ConLista).rides ?? []).forEach((x) => creadas.add(x.id));
     assert(a.status === 201 && ((a.body as ConLista).rides ?? []).length === 2, `la terminal: dos carreras (HTTP ${a.status})`);
     assert(b.status === 201 && !(b.body as ConLista).rides, `el hotel: una, con la respuesta de siempre (HTTP ${b.status})`, b.body);

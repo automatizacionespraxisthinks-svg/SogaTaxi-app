@@ -39,8 +39,8 @@ const CONDUCTORES = [
   { code: '103', plate: 'SVM903' },
 ];
 /** Los tres en el mismo punto, a unos 300 m del centro de la zona. */
-const PUNTO = { lat: 5.7806, lng: -73.1170 };
-const RECOGIDA = { lat: 5.7803, lng: -73.1142 };
+const PUNTO = { lat: 5.7151, lng: -72.9307 };
+const RECOGIDA = { lat: 5.7148, lng: -72.9279 };
 const TOKEN_OFICINA = 'token-prueba-oleadas-acumuladas';
 const OFICINA_ID = '01a20000-0000-7000-8000-00000000c001';
 
@@ -130,7 +130,7 @@ async function main(): Promise<void> {
     await db.delete(schema.users).where(eq(schema.users.id, OFICINA_ID));
     await db.insert(schema.users).values({
       id: OFICINA_ID,
-      email: 'prueba-oleadas-acumuladas@taxturistico.local',
+      email: 'prueba-oleadas-acumuladas@sogataxi.local',
       name: 'Prueba Oleadas',
       passwordHash: 'x',
       role: 'administrador',

@@ -29,7 +29,7 @@ const ejecutar = promisify(execFile);
 const DIST = join(__dirname, '../../dist/cli');
 const CODIGO = '994';
 const PLACA = 'CLI994';
-const CORREO = 'prueba-cli@taxturistico.local';
+const CORREO = 'prueba-cli@sogataxi.local';
 
 function assert(condition: boolean, message: string, context?: unknown): void {
   if (!condition) {

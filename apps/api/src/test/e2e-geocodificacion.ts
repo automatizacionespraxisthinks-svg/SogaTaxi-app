@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { CENTRO } from './coordenadas';
 
 /**
  * El punto de recogida, resuelto por la API y no por el agente.
@@ -23,7 +24,6 @@ const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
 const HAY_GEOCODIFICADOR = Boolean(process.env.GOOGLE_GEOCODING_API_KEY);
 
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 
 interface Json { [k: string]: unknown }
 

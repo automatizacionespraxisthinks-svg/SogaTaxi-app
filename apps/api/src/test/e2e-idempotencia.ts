@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
+import { CENTRO } from './coordenadas';
 
 /**
  * Prueba de extremo a extremo de la idempotencia, contra la API en marcha.
@@ -14,8 +15,7 @@ import { Pool } from 'pg';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
-const FUERA = { lat: 5.95, lng: -73.1142 };
+const FUERA = { lat: 5.95, lng: -72.9279 };
 
 let fallos = 0;
 const creadas: string[] = [];
@@ -103,7 +103,7 @@ async function main() {
     const tel = telefono();
     const a = await pedir(k, pedido(tel, 'Primero'));
     const otroCliente = await pedir(k, pedido(telefono(), 'Primero'));
-    const otroPunto = await pedir(k, pedido(tel, 'Primero', { lat: 5.7836, lng: -73.1177 }));
+    const otroPunto = await pedir(k, pedido(tel, 'Primero', { lat: 5.7181, lng: -72.9314 }));
     assert(a.status === 201, `la primera crea la carrera (HTTP ${a.status})`, a.body);
     assert(
       otroCliente.status === 409 && otroCliente.body.code === 'IDEMPOTENCY_MISMATCH',

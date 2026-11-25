@@ -2,8 +2,11 @@ package co.sogataxi.conductor
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.json.JSONArray
-import org.json.JSONObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * Cola de etapas sin señal, como la de la PWA (`apps/driver/src/api/queue.ts`).
@@ -35,41 +38,46 @@ object Cola {
     fun pendientes(): List<Accion> {
         val texto = Prefs.cola ?: return emptyList()
         return runCatching {
-            val arreglo = JSONArray(texto)
-            (0 until arreglo.length()).map { i ->
-                val j = arreglo.getJSONObject(i)
+            (analizarJson(texto) as JsonArray).map { elemento ->
+                val j = elemento as JsonObject
                 Accion(
-                    id = j.getString("id"),
-                    ruta = j.getString("ruta"),
-                    cuerpo = if (j.isNull("cuerpo")) null else j.getString("cuerpo"),
-                    dueno = if (j.isNull("dueno")) null else j.getString("dueno"),
-                    en = j.optLong("en"),
-                    nombre = j.optString("nombre", "una etapa"),
+                    id = j.texto("id")!!,
+                    ruta = j.texto("ruta")!!,
+                    cuerpo = j.texto("cuerpo"),
+                    dueno = j.texto("dueno"),
+                    en = j.largo("en") ?: 0,
+                    nombre = j.texto("nombre") ?: "una etapa",
                 )
             }
         }.getOrDefault(emptyList())
     }
 
     private fun guardar(acciones: List<Accion>) {
-        Prefs.cola = JSONArray().apply {
+        Prefs.cola = buildJsonArray {
             acciones.forEach {
-                put(
-                    JSONObject().put("id", it.id).put("ruta", it.ruta).put("cuerpo", it.cuerpo)
-                        .put("dueno", it.dueno).put("en", it.en).put("nombre", it.nombre),
+                add(
+                    buildJsonObject {
+                        put("id", it.id)
+                        put("ruta", it.ruta)
+                        si("cuerpo", it.cuerpo)
+                        si("dueno", it.dueno)
+                        put("en", it.en)
+                        put("nombre", it.nombre)
+                    },
                 )
             }
         }.toString()
         Sesion.encoladas(acciones.size)
     }
 
-    fun encolar(ruta: String, cuerpo: JSONObject?, nombre: String) {
+    fun encolar(ruta: String, cuerpo: JsonObject?, nombre: String) {
         guardar(
             pendientes() + Accion(
                 id = Api.nuevaClave(),
                 ruta = ruta,
                 cuerpo = cuerpo?.toString(),
                 dueno = Prefs.codigo,
-                en = System.currentTimeMillis(),
+                en = ahoraMs(),
                 nombre = nombre,
             ),
         )
@@ -86,7 +94,11 @@ object Cola {
             val todas = pendientes()
             val siguiente = todas.firstOrNull { it.dueno == null || it.dueno == Prefs.codigo } ?: break
             try {
-                Api.post(siguiente.ruta, siguiente.cuerpo?.let { JSONObject(it) }, idempotencia = siguiente.id)
+                Api.post(
+                    siguiente.ruta,
+                    siguiente.cuerpo?.let { analizarJson(it) as? JsonObject },
+                    idempotencia = siguiente.id,
+                )
                 Diagnostico.evento("Enviada: ${siguiente.nombre}")
             } catch (e: ApiError) {
                 if (e.pasajero || e.status == 401) {

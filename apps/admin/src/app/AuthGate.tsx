@@ -150,7 +150,7 @@ function Logo() {
 function LoginScreen({ onSuccess }: { onSuccess: (user: User, password: string) => void }) {
   // El de ejemplo solo en desarrollo: en producción, un correo inventado en
   // la casilla confunde a quien entra por primera vez.
-  const [email, setEmail] = useState(import.meta.env.DEV ? 'operadora@taxturistico.local' : '');
+  const [email, setEmail] = useState(import.meta.env.DEV ? 'operadora@sogataxi.local' : '');
   const [password, setPassword] = useState('');
   const [totp, setTotp] = useState('');
   // El código no se pide de entrada: hasta que la contraseña no es correcta,
@@ -635,7 +635,7 @@ function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void 
     const url = URL.createObjectURL(new Blob([texto], { type: 'text/plain;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'codigos-respaldo-tax-turistico.txt';
+    link.download = 'codigos-respaldo-sogataxi.txt';
     link.click();
     URL.revokeObjectURL(url);
   };

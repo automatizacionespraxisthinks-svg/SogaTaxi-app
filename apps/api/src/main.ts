@@ -1,4 +1,8 @@
 import 'reflect-metadata';
+// Lee apps/api/.env en desarrollo. Va antes de AppModule porque loadEnv() se
+// ejecuta al importar los módulos. No pisa variables ya definidas, así que en
+// el VPS mandan las de Dokploy (y la imagen no lleva .env: .dockerignore).
+import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Logger } from 'nestjs-pino';
@@ -9,13 +13,7 @@ import { Redis } from 'ioredis';
 import { AppModule } from './app.module';
 import { loadEnv } from './config/env';
 import { AppError, ProblemFilter } from './common/problem';
-import { sha256Hex } from './common/crypto';
-
-/** Rutas donde se prueba una credencial: el acceso del conductor y el de la oficina. */
-function esAcceso(url: string): boolean {
-  const ruta = url.split('?')[0];
-  return ruta === '/v1/auth/driver' || ruta === '/v1/auth/session';
-}
+import { claveDeLimite, esAcceso } from './common/limite';
 
 async function bootstrap(): Promise<void> {
   const env = loadEnv();
@@ -69,26 +67,14 @@ async function bootstrap(): Promise<void> {
     max: (request) => (esAcceso(request.url) ? 20 : 240),
     timeWindow: '1 minute',
     redis: new Redis(env.REDIS_URL, { keyPrefix: 'tax:rl:', maxRetriesPerRequest: null }),
-    /**
-     * Se cuenta por clave de API cuando la hay, y por IP en el resto.
-     *
-     * La clave va resumida, nunca tal cual: es el nombre de una clave de
-     * Redis, y Redis no guarda secretos. En Postgres solo vive el hash
-     * Argon2 (§8.1) y dejar el secreto entero aquí lo regalaría a cualquiera
-     * que lea la base de contadores o un volcado suyo. SHA-256 basta: no hay
-     * que verificar nada contra él, solo necesitar siempre el mismo cubo.
-     */
-    keyGenerator: (request) => {
-      /*
-       * En los accesos nunca por clave: cada `X-Api-Key` inventada abría un
-       * cubo nuevo, y con una distinta por petición no había límite para
-       * probar PIN (17/11/2026). Fuera de los accesos una clave falsa no
-       * consigue nada —la guarda la rechaza—, así que ahí se mantiene.
-       */
-      if (esAcceso(request.url)) return `acceso:${request.ip}`;
-      const apiKey = request.headers['x-api-key'] as string | undefined;
-      return apiKey ? `k:${sha256Hex(apiKey)}` : request.ip;
-    },
+    // Por conductor, por clave de API o por IP: ver `claveDeLimite`.
+    keyGenerator: (request) =>
+      claveDeLimite({
+        url: request.url,
+        ip: request.ip,
+        apiKey: request.headers['x-api-key'] as string | undefined,
+        authorization: request.headers.authorization,
+      }),
     /*
      * La PWA del conductor manda posición cada `POSITION_REPORT_*` —dos
      * segundos por defecto, 30 peticiones por minuto y conductor—, y todos

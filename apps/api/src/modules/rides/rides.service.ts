@@ -109,7 +109,7 @@ export class RidesService {
    * motivo: las zonas son para las estadísticas, y un rincón del municipio
    * sin dibujar no puede dejar a un cliente sin taxi.
    */
-  private async exigirPaipa(point: Point): Promise<void> {
+  private async exigirMunicipio(point: Point): Promise<void> {
     const { dentro, municipio } = await this.geocoding.cobertura(point);
     if (!dentro) {
       throw new AppError(
@@ -257,7 +257,7 @@ export class RidesService {
     // La ubicación compartida es la única que llega sin comprobar: las de
     // Google y el catálogo ya vienen comprobadas, y la de «sin ubicar» es la
     // del pueblo.
-    if (pickupSource === 'compartida') await this.exigirPaipa(point);
+    if (pickupSource === 'compartida') await this.exigirMunicipio(point);
 
     /*
      * Una ubicación compartida que cae en un lugar del catálogo lleva su
@@ -922,7 +922,7 @@ export class RidesService {
     const ubicacion = puntoNuevo
       ? { pickupSource: 'compartida' as const, pickupLink: link }
       : {};
-    if (puntoNuevo) await this.exigirPaipa(puntoNuevo);
+    if (puntoNuevo) await this.exigirMunicipio(puntoNuevo);
     const trayecto = this.trayectos.medir(
       point,
       ride.dropoffLat && ride.dropoffLng ? { lat: ride.dropoffLat, lng: ride.dropoffLng } : undefined,

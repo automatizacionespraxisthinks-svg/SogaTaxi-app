@@ -48,8 +48,11 @@ export const redisKeys = {
   driverMeta: (driverId: string) => `driver:${driverId}:meta`,
   /** Limitación de tasa por sujeto. */
   rateLimit: (subject: string, window: number) => `rl:${subject}:${window}`,
-  /** Marca de oleada en curso, para no lanzar dos a la vez. */
-  dispatchLock: (rideId: string) => `dispatch:${rideId}:lock`,
+  /**
+   * Cerrojo corto mientras una carrera pasa de una oleada a la siguiente
+   * (ver `DispatchService.escalate`).
+   */
+  escalada: (rideId: string) => `dispatch:${rideId}:escalando`,
   /**
    * Dirección ya resuelta. En un pueblo las mismas direcciones se repiten
    * mucho, y cada consulta al geocodificador se paga y se espera.

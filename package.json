@@ -8,16 +8,17 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
+    "build:shared": "pnpm --filter @tax/shared build",
+    "dev": "pnpm build:shared && pnpm -r --parallel --filter @tax/admin --filter @tax/driver dev",
     "dev:admin": "pnpm --filter @tax/admin dev",
     "dev:driver": "pnpm --filter @tax/driver dev",
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm build:shared && pnpm -r typecheck",
     "preview:admin": "pnpm --filter @tax/admin preview",
     "preview:driver": "pnpm --filter @tax/driver preview",
     "db:up": "docker compose -f docker-compose.dev.yml up -d",
     "db:down": "docker compose -f docker-compose.dev.yml down",
-    "dev:api": "pnpm --filter @tax/api dev",
+    "dev:api": "pnpm build:shared && pnpm --filter @tax/api dev",
     "build:tiles": "pnpm --filter @tax/tiles build:tiles"
   },
   "devDependencies": {

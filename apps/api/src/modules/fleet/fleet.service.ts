@@ -358,6 +358,26 @@ export class FleetService {
    */
   async pauseShift(driverId: string): Promise<void> {
     await this.cambiarEstadoDeTurno(driverId, 'AVAILABLE', 'PAUSED');
+
+    /*
+     * Las ofertas que tenía pendientes se le retiran (25/11/2026): antes
+     * podía pausar con una oferta en pantalla y aceptarla igual. El
+     * temporizador de cada oleada sigue su curso y, si era el último que la
+     * tenía, escala al vencer.
+     */
+    const retiradas = await this.db
+      .update(rideOffers)
+      .set({ response: 'revoked', revokedAt: new Date() })
+      .where(
+        and(
+          eq(rideOffers.driverId, driverId),
+          eq(rideOffers.response, 'pending'),
+          isNull(rideOffers.revokedAt),
+        ),
+      )
+      .returning({ rideId: rideOffers.rideId });
+    // Y se le quita de la pantalla, como al cerrar turno.
+    for (const { rideId } of retiradas) this.realtime.retirarOfertaDe(driverId, rideId);
   }
 
   async resumeShift(driverId: string): Promise<void> {

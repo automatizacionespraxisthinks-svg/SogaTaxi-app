@@ -5,6 +5,7 @@ import { uuidv7 } from 'uuidv7';
 import * as schema from '../db/schema';
 import { hashSecret, randomHex, randomToken } from '../common/crypto';
 import { leerPeriodo, resumir } from '../modules/reports/exports.data';
+import { CENTRO } from './coordenadas';
 
 /**
  * El conductor cancela una carrera por una causa mayor, contra la API de
@@ -31,11 +32,10 @@ const CONDUCTOR = { code: '101', plate: 'UBP472' };
 const OTRO = { code: '102', plate: 'TQR118' };
 const APARTADOS = [OTRO, { code: '103', plate: 'SVM903' }];
 const PIN = '4821';
-const CENTRO = { lat: 5.7803, lng: -73.1142 };
 /** El mínimo a bordo antes de poder finalizar, el mismo que usa la API. */
 const MIN_A_BORDO = Number(process.env.MIN_DURACION_CARRERA_MIN ?? 10);
 /** Dónde estaba el conductor al cancelar: un poco al norte del centro. */
-const EN_LA_VIA = { lat: 5.7861, lng: -73.1125 };
+const EN_LA_VIA = { lat: 5.7206, lng: -72.9262 };
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
 const db = drizzle(pool, { schema, casing: 'snake_case' });

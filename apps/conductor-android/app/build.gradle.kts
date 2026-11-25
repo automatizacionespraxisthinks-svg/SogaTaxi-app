@@ -1,11 +1,36 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+/**
+ * La firma de la versión final sale de `keystore.properties`, que NO va en
+ * git (ver README, «Firmar la versión final»). Sin ese archivo el proyecto
+ * compila igual y la versión final queda sin firmar.
+ */
+val firma = Properties().apply {
+    val archivo = rootProject.file("keystore.properties")
+    if (archivo.exists()) archivo.inputStream().use { load(it) }
+}
+val hayFirma = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+    .all { !firma.getProperty(it).isNullOrBlank() }
+
 android {
     namespace = "co.sogataxi.conductor"
+
+    signingConfigs {
+        if (hayFirma) {
+            create("release") {
+                storeFile = rootProject.file(firma.getProperty("storeFile"))
+                storePassword = firma.getProperty("storePassword")
+                keyAlias = firma.getProperty("keyAlias")
+                keyPassword = firma.getProperty("keyPassword")
+            }
+        }
+    }
     compileSdk = 35
 
     defaultConfig {
@@ -14,8 +39,11 @@ android {
         // es el mínimo de los canales de notificación.
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0-fase2"
+        // Sube en cada APK que se entrega: es el número que la app compara
+        // con el de la API (APP_ANDROID_VERSION_CODE) para avisar que hay
+        // una versión nueva.
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     buildTypes {
@@ -28,6 +56,7 @@ android {
             buildConfigField("boolean", "API_EDITABLE", "true")
         }
         release {
+            if (hayFirma) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             // PENDIENTE: el dominio de producción de la API de SogaTaxi. Solo
             // HTTPS: la versión final no permite tráfico en texto plano.
@@ -50,12 +79,10 @@ android {
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2024.12.01"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.activity:activity-compose:1.9.3")
+    // El código común: sesión, cola, API, motor del turno y las pantallas.
+    implementation(project(":shared"))
+
     implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
 
     // Ubicación de Google Play Services: la que mejor sostiene el GPS con la
     // pantalla apagada y combina GPS, wifi y celdas.
@@ -63,6 +90,4 @@ dependencies {
 
     // El mismo socket que usa la PWA (namespace /rt de socket.io 4).
     implementation("io.socket:socket.io-client:2.1.1")
-
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }
