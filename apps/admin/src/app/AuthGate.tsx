@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { motion } from 'motion/react';
-import { Check, Copy, Download, KeyRound, LockKeyhole, ShieldCheck, Smartphone } from 'lucide-react';
-import QRCode from 'qrcode';
+import { LockKeyhole, ShieldCheck } from 'lucide-react';
 import { PASSWORD_MIN_LENGTH, evaluatePassword } from '@tax/shared';
 import { Banner, Button, Field, Input, transition } from '@tax/ui';
 import logo from '../assets/logo-sogataxi.png';
@@ -17,8 +16,8 @@ interface User {
   /** Clave del rol: `administrador`, `operador` o uno creado en el panel. */
   role: string;
   roleName?: string;
-  /** Si no, la sesión solo sirve para darlo de alta (§8.1). */
-  totpEnabled: boolean;
+  /** Ya no se usa en el panel: el segundo factor se retiró el 25/11/2026. */
+  totpEnabled?: boolean;
   /** Entró con una contraseña temporal: primero tiene que cambiarla. */
   mustChangePassword: boolean;
 }
@@ -30,10 +29,10 @@ interface User {
  * el navegador la tiene pero JavaScript no puede leerla. Un 401 significa
  * «muestra el acceso», y es la única señal fiable.
  *
- * Entre «sin sesión» y «dentro» hay dos estados más, en este orden: con una
- * contraseña temporal que hay que cambiar, y sin segundo factor. El servidor
- * responde `PASSWORD_CHANGE_REQUIRED` y `TOTP_SETUP_REQUIRED` a todo lo demás,
- * así que no son recomendaciones de la interfaz sino puertas cerradas.
+ * Entre «sin sesión» y «dentro» hay un estado más: con una contraseña
+ * temporal que hay que cambiar. El servidor responde
+ * `PASSWORD_CHANGE_REQUIRED` a todo lo demás. El segundo factor se retiró
+ * del panel el 25/11/2026: basta usuario y contraseña.
  */
 export function AuthGate({ children }: { children: (user: User) => ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -43,8 +42,6 @@ export function AuthGate({ children }: { children: (user: User) => ReactNode }) 
    * segundos después. Solo vive en memoria: si recarga la página, se le pide.
    */
   const [claveTemporal, setClaveTemporal] = useState<string>();
-  // Si viene de cambiar la temporal, el alta del 2FA es el paso 2 de 2.
-  const [vieneDeCambiarla, setVieneDeCambiarla] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,21 +87,10 @@ export function AuthGate({ children }: { children: (user: User) => ReactNode }) 
       <CambioObligatorio
         user={user}
         claveTemporal={claveTemporal}
-        conSegundoFactorPendiente={!user.totpEnabled}
         onDone={() => {
           setClaveTemporal(undefined);
-          setVieneDeCambiarla(true);
           setUser({ ...user, mustChangePassword: false });
         }}
-      />
-    );
-  }
-
-  if (!user.totpEnabled) {
-    return (
-      <TotpEnrollment
-        paso={vieneDeCambiarla ? 'Paso 2 de 2' : undefined}
-        onDone={() => setUser({ ...user, totpEnabled: true })}
       />
     );
   }
@@ -152,17 +138,8 @@ function LoginScreen({ onSuccess }: { onSuccess: (user: User, password: string) 
   // la casilla confunde a quien entra por primera vez.
   const [email, setEmail] = useState(import.meta.env.DEV ? 'operadora@sogataxi.local' : '');
   const [password, setPassword] = useState('');
-  const [totp, setTotp] = useState('');
-  // El código no se pide de entrada: hasta que la contraseña no es correcta,
-  // el servidor ni siquiera dice si esta cuenta tiene segundo factor.
-  const [needsCode, setNeedsCode] = useState(false);
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
-  const codeRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (needsCode) codeRef.current?.focus();
-  }, [needsCode]);
 
   const submit = async () => {
     setSubmitting(true);
@@ -172,24 +149,10 @@ function LoginScreen({ onSuccess }: { onSuccess: (user: User, password: string) 
       const response = await api.post<{ user: User }>('/v1/auth/session', {
         email,
         password,
-        totp: totp.trim() || undefined,
       });
       onSuccess(response.user, password);
     } catch (cause) {
       const code = cause instanceof ApiError ? cause.code : undefined;
-
-      if (code === 'TOTP_REQUIRED') {
-        setNeedsCode(true);
-        setError(undefined);
-        return;
-      }
-
-      if (code === 'TOTP_INVALID') {
-        setNeedsCode(true);
-        setTotp('');
-        setError('Código incorrecto o ya usado. Mira el siguiente en tu teléfono.');
-        return;
-      }
 
       if (code === 'TEMP_PASSWORD_EXPIRED') {
         setError('Tu contraseña temporal caducó. Pide otra a un administrador de la oficina.');
@@ -224,51 +187,22 @@ function LoginScreen({ onSuccess }: { onSuccess: (user: User, password: string) 
             autoCapitalize="none"
             spellCheck={false}
             autoComplete="username"
-            disabled={needsCode}
             value={email}
             onChange={(event) => setEmail(event.target.value)}
           />
         </Field>
 
-        <Field label="Contraseña" htmlFor="password" required error={needsCode ? undefined : error}>
+        <Field label="Contraseña" htmlFor="password" required error={error}>
           <Input
             id="password"
             type="password"
             autoComplete="current-password"
-            disabled={needsCode}
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             onKeyDown={(event) => event.key === 'Enter' && void submit()}
           />
         </Field>
 
-        {needsCode ? (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            transition={transition.enter}
-          >
-            <Field
-              label="Código de tu aplicación"
-              htmlFor="totp"
-              required
-              error={error}
-              hint="Seis dígitos, o uno de tus códigos de respaldo si perdiste el teléfono."
-            >
-              <Input
-                ref={codeRef}
-                id="totp"
-                inputMode="text"
-                autoComplete="one-time-code"
-                placeholder="000000"
-                value={totp}
-                onChange={(event) => setTotp(event.target.value.toUpperCase())}
-                onKeyDown={(event) => event.key === 'Enter' && void submit()}
-                className="font-mono text-lg tracking-[0.3em]"
-              />
-            </Field>
-          </motion.div>
-        ) : null}
       </div>
 
       <Button
@@ -278,7 +212,7 @@ function LoginScreen({ onSuccess }: { onSuccess: (user: User, password: string) 
         loading={submitting}
         onClick={() => void submit()}
       >
-        {needsCode ? 'Confirmar' : 'Entrar'}
+        Entrar
       </Button>
 
       <p className="flex items-start gap-2 text-micro text-ink-muted">
@@ -296,19 +230,15 @@ function LoginScreen({ onSuccess }: { onSuccess: (user: User, password: string) 
  * Cambio obligatorio de una contraseña temporal, antes de nada más.
  *
  * La temporal la generó otra persona y la ha visto; puede haber viajado por
- * WhatsApp. Hasta cambiarla, el servidor no deja hacer otra cosa, ni siquiera
- * el alta del segundo factor: si no, quien la generó podría adelantarse y dar
- * de alta su propio teléfono.
+ * WhatsApp. Hasta cambiarla, el servidor no deja hacer otra cosa.
  */
 function CambioObligatorio({
   user,
   claveTemporal,
-  conSegundoFactorPendiente,
   onDone,
 }: {
   user: User;
   claveTemporal: string | undefined;
-  conSegundoFactorPendiente: boolean;
   onDone: () => void;
 }) {
   const [actual, setActual] = useState(claveTemporal ?? '');
@@ -347,11 +277,6 @@ function CambioObligatorio({
     <Shell wide>
       <div>
         <Logo />
-        {conSegundoFactorPendiente ? (
-          <p className="mb-1 text-micro font-medium uppercase tracking-[0.06em] text-ink-muted">
-            Paso 1 de 2
-          </p>
-        ) : null}
         <h1 className="text-title font-semibold text-ink">Elige tu contraseña</h1>
         <p className="mt-1 text-base text-ink-secondary">
           Hola, {user.name.split(' ')[0]}. La que te dieron es temporal: la conoce quien creó tu
@@ -427,263 +352,7 @@ function CambioObligatorio({
         disabled={!puedeEnviar}
         onClick={() => void cambiar()}
       >
-        {conSegundoFactorPendiente ? 'Guardar y seguir' : 'Guardar y entrar'}
-      </Button>
-    </Shell>
-  );
-}
-
-/* -------------------------------------------------------------- el alta --- */
-
-/**
- * Alta del segundo factor, obligatoria antes de usar el panel.
- *
- * Tres momentos: escanear, confirmar y guardar los repuestos. El tercero no
- * se puede repetir —en la base solo queda el hash— y por eso hay que marcar
- * explícitamente que se guardaron.
- */
-function TotpEnrollment({ onDone, paso }: { onDone: () => void; paso?: string }) {
-  const [secret, setSecret] = useState<string>();
-  const [qr, setQr] = useState<string>();
-  const [code, setCode] = useState('');
-  const [error, setError] = useState<string>();
-  const [submitting, setSubmitting] = useState(false);
-  const [recoveryCodes, setRecoveryCodes] = useState<string[]>();
-
-  useEffect(() => {
-    let cancelled = false;
-
-    api
-      .post<{ secret: string; uri: string }>('/v1/auth/totp/setup')
-      .then(async (response) => {
-        if (cancelled) return;
-        setSecret(response.secret);
-        // `margin: 0` porque el marco lo pone el contenedor; el QR necesita
-        // su zona de silencio, y se la da el padding blanco de abajo.
-        setQr(await QRCode.toString(response.uri, { type: 'svg', margin: 0 }));
-      })
-      .catch(() => {
-        if (!cancelled) setError('No se pudo preparar el segundo factor. Recarga la página.');
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const activate = async () => {
-    setSubmitting(true);
-    setError(undefined);
-
-    try {
-      const response = await api.post<{ recoveryCodes: string[] }>('/v1/auth/totp/activate', {
-        code: code.trim(),
-      });
-      setRecoveryCodes(response.recoveryCodes);
-    } catch (cause) {
-      setError(
-        cause instanceof ApiError && cause.code === 'TOTP_INVALID'
-          ? 'El código no coincide. Comprueba que la hora del teléfono sea la correcta.'
-          : 'No se pudo activar. Inténtalo de nuevo.',
-      );
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  if (recoveryCodes) return <RecoveryCodes codes={recoveryCodes} onDone={onDone} />;
-
-  return (
-    <Shell wide>
-      <div>
-        <Logo />
-        {paso ? (
-          <p className="mb-1 text-micro font-medium uppercase tracking-[0.06em] text-ink-muted">
-            {paso}
-          </p>
-        ) : null}
-        <h1 className="text-title font-semibold text-ink">Activa el segundo factor</h1>
-        <p className="mt-1 text-base text-ink-secondary">
-          El panel ve el teléfono y la dirección de todos los clientes. Una contraseña sola no
-          basta para abrirlo.
-        </p>
-      </div>
-
-      <ol className="space-y-5">
-        <Step number={1} icon={<Smartphone className="size-4" />} title="Escanea este código">
-          <p className="text-base text-ink-secondary">
-            Con Google Authenticator, Aegis, 1Password o la aplicación que ya uses.
-          </p>
-
-          {/*
-            El QR va siempre sobre blanco, también en modo oscuro: invertido,
-            muchos lectores no lo reconocen y el operador se queda mirando un
-            cuadro que no hace nada.
-          */}
-          <div className="mt-3 flex justify-center">
-            {qr ? (
-              <div
-                className="rounded-md bg-surface p-4 [&>svg]:size-44"
-                dangerouslySetInnerHTML={{ __html: qr }}
-              />
-            ) : (
-              <div className="animate-breathe size-[13rem] rounded-md border border-line bg-surface-sunk" />
-            )}
-          </div>
-
-          {secret ? (
-            <div className="mt-3">
-              <p className="text-caption text-ink-muted">Si la cámara no coopera, escríbelo:</p>
-              <p className="mt-1 select-all break-all font-mono text-caption tracking-[0.12em] text-ink-secondary">
-                {secret.replace(/(.{4})/g, '$1 ').trim()}
-              </p>
-            </div>
-          ) : null}
-        </Step>
-
-        <Step number={2} icon={<KeyRound className="size-4" />} title="Escribe el código que aparece">
-          <Field label="Código de seis dígitos" htmlFor="code" required error={error}>
-            <Input
-              id="code"
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              placeholder="000000"
-              maxLength={6}
-              value={code}
-              onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))}
-              onKeyDown={(event) => event.key === 'Enter' && void activate()}
-              className="font-mono text-lg tracking-[0.3em]"
-            />
-          </Field>
-        </Step>
-      </ol>
-
-      <Button
-        variant="primary"
-        size="lg"
-        className="w-full"
-        loading={submitting}
-        disabled={code.length !== 6 || !secret}
-        onClick={() => void activate()}
-      >
-        Activar
-      </Button>
-    </Shell>
-  );
-}
-
-function Step({
-  number,
-  icon,
-  title,
-  children,
-}: {
-  number: number;
-  icon: ReactNode;
-  title: string;
-  children: ReactNode;
-}) {
-  return (
-    <li className="flex gap-3">
-      <span
-        aria-hidden="true"
-        className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border border-line bg-surface-sunk text-ink-secondary"
-      >
-        {icon}
-      </span>
-      <div className="min-w-0 flex-1">
-        <h2 className="text-base font-medium text-ink">
-          <span className="text-ink-muted">{number}.</span> {title}
-        </h2>
-        <div className="mt-1.5">{children}</div>
-      </div>
-    </li>
-  );
-}
-
-/* ------------------------------------------------------ los repuestos --- */
-
-/**
- * Los códigos de respaldo, que solo se ven una vez.
- *
- * En la base queda el hash, así que no hay forma de volver a enseñarlos. Es
- * incómodo a propósito, pero el día del teléfono roto son la diferencia entre
- * una llamada y una oficina parada.
- */
-function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) {
-  const [saved, setSaved] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  const texto = [
-    'Códigos de respaldo · Panel de SogaTaxi',
-    'Cada uno sirve una sola vez. Guárdalos donde no estén junto a la contraseña.',
-    '',
-    ...codes,
-  ].join('\n');
-
-  const copiar = async () => {
-    try {
-      await navigator.clipboard.writeText(texto);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Sin permiso de portapapeles quedan la descarga y el papel.
-    }
-  };
-
-  const descargar = () => {
-    const url = URL.createObjectURL(new Blob([texto], { type: 'text/plain;charset=utf-8' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'codigos-respaldo-sogataxi.txt';
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  return (
-    <Shell wide>
-      <div>
-        <Logo />
-        <h1 className="text-title font-semibold text-ink">Guarda estos códigos</h1>
-        <p className="mt-1 text-base text-ink-secondary">
-          Son tu única forma de entrar si pierdes el teléfono. Cada uno sirve una vez y no se
-          pueden volver a mostrar.
-        </p>
-      </div>
-
-      <ul className="grid grid-cols-2 gap-2 rounded-lg border border-line bg-surface-sunk p-4">
-        {codes.map((code) => (
-          <li key={code} className="select-all font-mono text-base tracking-[0.06em] text-ink">
-            {code}
-          </li>
-        ))}
-      </ul>
-
-      <div className="flex gap-2">
-        <Button
-          className="flex-1"
-          icon={copied ? <Check className="size-4" /> : <Copy className="size-4" />}
-          onClick={() => void copiar()}
-        >
-          {copied ? 'Copiados' : 'Copiar'}
-        </Button>
-        <Button className="flex-1" icon={<Download className="size-4" />} onClick={descargar}>
-          Descargar
-        </Button>
-      </div>
-
-      <label className="flex cursor-pointer items-start gap-2.5 text-base text-ink-secondary">
-        <input
-          type="checkbox"
-          checked={saved}
-          onChange={(event) => setSaved(event.target.checked)}
-          className="mt-1 size-4 accent-[var(--c-accent)]"
-        />
-        Los guardé en un sitio seguro, separado de mi contraseña.
-      </label>
-
-      <Button variant="primary" size="lg" className="w-full" disabled={!saved} onClick={onDone}>
-        Entrar al panel
+        Guardar y entrar
       </Button>
     </Shell>
   );

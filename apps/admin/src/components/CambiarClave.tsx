@@ -181,7 +181,7 @@ export function CambiarClave() {
             {error ? <Banner tone="critical">{error}</Banner> : null}
 
             <p className="text-micro text-ink-muted">
-              Al cambiarla se cerrarán tus otras sesiones abiertas. Tu segundo factor no cambia.
+              Al cambiarla se cerrarán tus otras sesiones abiertas.
             </p>
 
             <Button

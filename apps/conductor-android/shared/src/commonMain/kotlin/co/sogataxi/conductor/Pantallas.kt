@@ -113,6 +113,8 @@ fun PantallaFueraDeTurno(sesion: EstadoSesion, alAbrir: () -> Unit) {
     var enviando by remember { mutableStateOf(false) }
     var refresco by remember { mutableIntStateOf(0) }
     val pedirPermisos = rememberPedirPermisos { refresco++ }
+    // Al volver de Ajustes, el chequeo muestra lo que se acaba de conceder.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { refresco++ }
     // Una versión que ya no se entiende con la oficina no abre turno.
     val versionNueva by Actualizacion.flujo.collectAsState()
     val hayQueActualizar = versionNueva?.obligatoria == true

@@ -11,6 +11,10 @@ import androidx.activity.compose.setContent
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { AppConductor() }
+        // La oferta también dentro de la app: con el teléfono desbloqueado y
+        // la app en pantalla, Android no abre OfertaActivity (solo un aviso
+        // flotante, que MIUI y ColorOS apagan en apps instaladas por APK), y
+        // sin permiso de notificaciones no se veía nada mientras sonaba.
+        setContent { AppConductor(ofertaIntegrada = true) }
     }
 }

@@ -11,7 +11,7 @@ import {
 import { Banner, Button, Card, CardHeader, Field, Input, Sheet, Skeleton, Switch, cn, useToast } from '@tax/ui';
 import { ApiError, api } from '../api/client';
 import { useSesion } from '../api/queries';
-import { CodigoDeConfirmacion, resumenDePermisos } from './Permisos';
+import { resumenDePermisos } from './Permisos';
 
 /**
  * Roles y permisos (RBAC, §8.1). Con «Gestionar roles».
@@ -22,8 +22,7 @@ import { CodigoDeConfirmacion, resumenDePermisos } from './Permisos';
  *
  * Las reglas las hace cumplir la API; aquí solo se explican y se evita
  * enseñar lo que va a fallar: nadie da permisos que no tiene, el
- * administrador no se edita, nadie edita su propio rol, y cambiar permisos
- * pide el código del teléfono.
+ * administrador no se edita y nadie edita su propio rol.
  */
 
 interface Rol {
@@ -200,7 +199,6 @@ function EditorDeRol({ rol, onListo }: { rol?: Rol; onListo: () => void }) {
   const [nombre, setNombre] = useState(rol?.name ?? '');
   const [descripcion, setDescripcion] = useState(rol?.description ?? '');
   const [permisos, setPermisos] = useState<Permiso[]>(rol?.permissions ?? []);
-  const [codigo, setCodigo] = useState('');
   const [error, setError] = useState<string>();
   const [confirmarBorrado, setConfirmarBorrado] = useState(false);
 
@@ -210,9 +208,8 @@ function EditorDeRol({ rol, onListo }: { rol?: Rol; onListo: () => void }) {
     return () => window.clearTimeout(t);
   }, [confirmarBorrado]);
 
-  const cambianPermisos = !rol || [...permisos].sort().join() !== [...rol.permissions].sort().join();
   const nombreValido = nombre.trim().length >= 3;
-  const puedeGuardar = nombreValido && (!cambianPermisos || codigo.length === 6);
+  const puedeGuardar = nombreValido;
 
   /** Exportar sin poder abrir Reportes sería un botón inalcanzable. */
   const alternar = (clave: Permiso, encender: boolean) => {
@@ -233,7 +230,6 @@ function EditorDeRol({ rol, onListo }: { rol?: Rol; onListo: () => void }) {
         name: nombre.trim(),
         description: descripcion.trim(),
         permissions: permisos,
-        ...(cambianPermisos ? { codigo } : {}),
       };
       return rol ? api.patch(`/v1/admin/roles/${rol.key}`, cuerpo) : api.post('/v1/admin/roles', cuerpo);
     },
@@ -252,7 +248,6 @@ function EditorDeRol({ rol, onListo }: { rol?: Rol; onListo: () => void }) {
       onListo();
     },
     onError: (causa: unknown) => {
-      setCodigo('');
       setError(causa instanceof ApiError ? causa.message : 'No se pudo guardar. Inténtalo de nuevo.');
     },
   });
@@ -338,17 +333,6 @@ function EditorDeRol({ rol, onListo }: { rol?: Rol; onListo: () => void }) {
           </fieldset>
         ))}
       </div>
-
-      {cambianPermisos ? (
-        <CodigoDeConfirmacion
-          value={codigo}
-          onChange={(c) => {
-            setCodigo(c);
-            setError(undefined);
-          }}
-          onEnter={() => puedeGuardar && guardar.mutate()}
-        />
-      ) : null}
 
       {error ? <Banner tone="critical">{error}</Banner> : null}
 

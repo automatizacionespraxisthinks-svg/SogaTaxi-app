@@ -111,8 +111,12 @@ class MotorDeTurno(private val anfitrion: AnfitrionDeTurno) : OyenteTiempoReal {
         // GPS encendido hasta que el conductor abra la app.
         iniciadoEn = ahoraMs()
         vigiaDeFase = escena.launch {
-            Sesion.flujo.map { it.fase }.distinctUntilChanged().collect { fase ->
-                if (fase == Fase.ACCESO) detener() else configurarGps(modoGps(fase))
+            // También si la API confirma que ya no hay turno (la oficina lo
+            // cerró con el socket caído y se perdió `shift:closed`): sin esto
+            // el GPS seguía enviando cada 2 s y la API rechazaba cada envío.
+            Sesion.flujo.map { it.fase to it.enLinea }.distinctUntilChanged().collect { (fase, enLinea) ->
+                if (fase == Fase.ACCESO || (fase == Fase.FUERA_DE_TURNO && enLinea)) detener()
+                else configurarGps(modoGps(fase))
             }
         }
     }

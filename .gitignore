@@ -23,3 +23,6 @@ apps/api/.certs/
 
 # Flujos de n8n exportados: llevan el secreto de firma de eventos dentro.
 n8n/
+
+# APK y otros archivos para repartir a mano
+entregables/

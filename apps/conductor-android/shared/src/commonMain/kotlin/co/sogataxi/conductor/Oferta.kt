@@ -68,7 +68,25 @@ object Ofertas {
 
     private var vencimiento: Job? = null
 
+    /** La carrera cuyo «aceptar» está en vuelo: los botones se apagan. */
+    private val aceptandoFlujo = MutableStateFlow<String?>(null)
+    val aceptando: StateFlow<String?> = aceptandoFlujo
+
+    /**
+     * Ofertas ya contestadas en esta sesión de la app. `refrescar` puede leer
+     * `pendingOffer` antes de que la API procese el rechazo, y sin esto la
+     * misma oferta volvía a la pantalla con la alarma sonando otra vez.
+     */
+    private val contestadas = ArrayDeque<String>()
+
+    private fun marcarContestada(rideId: String) {
+        if (rideId in contestadas) return
+        contestadas.addLast(rideId)
+        while (contestadas.size > 50) contestadas.removeFirst()
+    }
+
     fun mostrar(oferta: OfertaDeCarrera) {
+        if (oferta.rideId in contestadas) return
         actual.value = oferta
         Diagnostico.evento("Oferta ${oferta.codigo}: ${oferta.recogida}")
         plataforma.sonarAlarma()
@@ -95,27 +113,42 @@ object Ofertas {
     }
 
     fun aceptar(rideId: String, alTerminar: (String?) -> Unit = {}) {
-        val oferta = actual.value ?: return alTerminar("La oferta ya no está")
+        val oferta = actual.value?.takeIf { it.rideId == rideId } ?: return alTerminar("La oferta ya no está")
+        // Un segundo toque (o la pantalla recreada) mientras viaja el primero
+        // no manda otro «aceptar»: el segundo respondía «no se pudo» aunque
+        // el primero sí hubiera entrado.
+        if (aceptandoFlujo.value == rideId) return
         plataforma.callarAlarma()
         if (oferta.prueba) {
             retirar(rideId, "Prueba aceptada (no se llamó a la API)")
             return alTerminar(null)
         }
+        aceptandoFlujo.value = rideId
         escena.launch {
             try {
                 Api.post("/v1/driver/rides/$rideId/accept", idempotencia = Api.nuevaClave())
+                marcarContestada(rideId)
                 retirar(rideId, "Aceptó la carrera ${oferta.codigo}")
                 Sesion.refrescar()
                 alTerminar(null)
             } catch (e: Exception) {
                 retirar(rideId, "No se pudo aceptar: ${e.message}")
-                alTerminar(e.message ?: "No se pudo aceptar")
+                // Si se agotó el tiempo pero llegó al servidor, el conductor
+                // puede estar asignado: se pregunta a la API en vez de dejar
+                // la pantalla en «Esperando carrera».
+                runCatching { Sesion.refrescar() }
+                val asignada = Sesion.flujo.value.carrera?.rideId == rideId
+                alTerminar(if (asignada) null else e.message ?: "No se pudo aceptar")
+            } finally {
+                aceptandoFlujo.value = null
             }
         }
     }
 
     fun rechazar(rideId: String) {
-        val oferta = actual.value ?: return
+        val oferta = actual.value?.takeIf { it.rideId == rideId } ?: return
+        if (aceptandoFlujo.value == rideId) return
+        marcarContestada(rideId)
         retirar(rideId, "Rechazó la oferta ${oferta.codigo}")
         if (oferta.prueba) return
         escena.launch { runCatching { Api.post("/v1/driver/rides/$rideId/reject") } }

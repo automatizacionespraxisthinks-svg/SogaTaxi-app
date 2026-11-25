@@ -328,15 +328,6 @@ en el VPS con «can't resolve dependencies of the SessionGuard». Esta prueba
 corre `node dist/cli/*.js` y falla si aparece ese error.
 
 ```bash
-pnpm --filter @tax/api exec tsx src/test/e2e-totp.ts
-```
-
-Recorre el segundo factor de la oficina: una cuenta sin él que no puede usar
-el panel, el alta con el QR, el acceso pidiendo el código, el rechazo del
-mismo código dos veces, el código de respaldo y el bloqueo tras cinco
-intentos. Deja la cuenta como estaba, así que se puede repetir.
-
-```bash
 pnpm --filter @tax/api exec tsx src/test/e2e-push.ts <clave-de-api>
 ```
 

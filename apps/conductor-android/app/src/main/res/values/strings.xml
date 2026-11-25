@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SogaTaxi Conductor</string>
+    <!-- Bajo el ícono: «SogaTaxi Conductor» se corta en casi todos los lanzadores. -->
+    <string name="nombre_en_lanzador">SogaTaxi</string>
 </resources>

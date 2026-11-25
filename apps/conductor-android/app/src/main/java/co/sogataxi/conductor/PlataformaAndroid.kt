@@ -10,6 +10,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.location.LocationManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -18,6 +20,7 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -37,8 +40,11 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
 
     init {
         // La fase 0 guardaba el token en claro: se cifra y se borra el viejo.
+        // Si el Keystore falla aquí, la app no se cae al arrancar: el
+        // conductor vuelve a entrar con su código.
         prefs.getString("token", null)?.let { viejo ->
-            prefs.edit().putString("tokenCifrado", Cifrado.cifrar(viejo)).remove("token").apply()
+            runCatching { prefs.edit().putString("tokenCifrado", Cifrado.cifrar(viejo)).remove("token").apply() }
+                .onFailure { prefs.edit().remove("token").apply() }
         }
         // La fase 0 guardaba aquí la carrera en curso; ahora la dice la API.
         prefs.edit().remove("rideId").apply()
@@ -63,11 +69,24 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
         if (yaMismo) edicion.commit() else edicion.apply()
     }
 
-    override fun leerSecreto(): String? = prefs.getString("tokenCifrado", null)?.let { Cifrado.descifrar(it) }
+    /**
+     * El token descifrado se guarda en memoria. Antes se descifraba con el
+     * Keystore en cada petición (unas 30 por minuto en turno), y un fallo
+     * pasajero del Keystore —frecuente en algunos OPPO y Xiaomi— mandaba la
+     * petición sin token: 401, pantalla de acceso y turno detenido.
+     */
+    @Volatile private var tokenEnMemoria: String? = null
+
+    override fun leerSecreto(): String? = tokenEnMemoria
+        ?: prefs.getString("tokenCifrado", null)
+            ?.let { runCatching { Cifrado.descifrar(it) }.getOrNull() }
+            ?.also { tokenEnMemoria = it }
 
     override fun guardarSecreto(valor: String?) {
+        tokenEnMemoria = valor
+        val cifrado = valor?.let { runCatching { Cifrado.cifrar(it) }.getOrNull() }
         prefs.edit().apply {
-            if (valor == null) remove("tokenCifrado") else putString("tokenCifrado", Cifrado.cifrar(valor))
+            if (cifrado == null) remove("tokenCifrado") else putString("tokenCifrado", cifrado)
         }.apply()
     }
 
@@ -96,6 +115,11 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
             val bytes = (if (estado in 200..299) conexion.inputStream else conexion.errorStream)
                 ?.use { it.readBytes() } ?: ByteArray(0)
             RespuestaHttp(estado, bytes)
+        } catch (e: javax.net.ssl.SSLException) {
+            // Casi siempre es la fecha del teléfono mal puesta: el certificado
+            // parece «aún no válido» o «caducado». Decir «sin señal» lo dejaba
+            // así para siempre.
+            throw SinSenal(Exception("Revisa la fecha y la hora del teléfono (deben ser automáticas)", e))
         } catch (e: IOException) {
             throw SinSenal(e)
         } finally {
@@ -114,9 +138,38 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
             app.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
         val bateria = app.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(app.packageName)
         val paquete = Uri.parse("package:${app.packageName}")
+        val ajustesDeLaApp = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, paquete)
+        val gps = LocationManagerCompat.isLocationEnabled(app.getSystemService(LocationManager::class.java))
+        val volumenAlarma = app.getSystemService(AudioManager::class.java).getStreamVolume(AudioManager.STREAM_ALARM) > 0
+        val canalOfertas = app.getSystemService(NotificationManager::class.java)
+            .getNotificationChannel(App.CANAL_OFERTAS)?.importance != NotificationManager.IMPORTANCE_NONE
         return listOf(
+            // Sin «arreglar», el botón pide el permiso; si Android ya no
+            // muestra el diálogo (dos negativas), `rememberPedirPermisos` abre
+            // los ajustes de la app.
             Requisito("Ubicación", tienePermisoDeUbicacion()),
-            Requisito("Notificaciones", NotificationManagerCompat.from(app).areNotificationsEnabled()),
+            Requisito("GPS del teléfono encendido", gps) {
+                abrirAjuste(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+            },
+            Requisito("Notificaciones", NotificationManagerCompat.from(app).areNotificationsEnabled() && canalOfertas) {
+                abrirAjuste(
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, app.packageName),
+                    respaldo = ajustesDeLaApp,
+                )
+            },
+            // La oferta suena por el canal de alarma: con ese volumen en 0
+            // no se oye aunque el timbre esté alto.
+            Requisito("Volumen de alarma", volumenAlarma) {
+                runCatching {
+                    val audio = app.getSystemService(AudioManager::class.java)
+                    audio.setStreamVolume(
+                        AudioManager.STREAM_ALARM,
+                        (audio.getStreamMaxVolume(AudioManager.STREAM_ALARM) * 0.8).toInt().coerceAtLeast(1),
+                        AudioManager.FLAG_SHOW_UI,
+                    )
+                }.onFailure { mensajeBreve("Sube el volumen de la alarma en Ajustes › Sonido.") }
+            },
             Requisito("Ofertas a pantalla completa", pantallaCompleta) {
                 if (Build.VERSION.SDK_INT >= 34) {
                     abrirAjuste(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, paquete))
@@ -129,13 +182,35 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
         )
     }
 
-    private fun abrirAjuste(intent: Intent) {
+    private fun abrirAjuste(intent: Intent, respaldo: Intent? = null) {
         runCatching { app.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            .recoverCatching { respaldo?.let { app.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } ?: throw it }
             .onFailure { mensajeBreve("Este teléfono no abre ese ajuste: búscalo en Ajustes.") }
     }
 
-    override fun iniciarTurno() = TurnoService.iniciar(app)
-    override fun detenerTurno() = TurnoService.detener(app)
+    /**
+     * Android 12+ no deja iniciar un servicio en primer plano si la app ya no
+     * está en pantalla (el conductor tocó «Iniciar turno» y bloqueó el
+     * teléfono mientras esperaba la red). Antes la excepción tumbaba la app;
+     * ahora se anota y el siguiente ON_RESUME lo vuelve a intentar.
+     */
+    override fun iniciarTurno() {
+        try {
+            TurnoService.iniciar(app)
+        } catch (e: Exception) {
+            Diagnostico.evento("No se pudo iniciar el turno en segundo plano: ${e.javaClass.simpleName}")
+            Diagnostico.turnoTerminado()
+            avisar(
+                Avisos.INTERRUMPIDO,
+                "Abre la app para recibir carreras",
+                "El turno está abierto en la oficina, pero el GPS no arrancó. Toca aquí.",
+            )
+        }
+    }
+
+    override fun detenerTurno() {
+        runCatching { TurnoService.detener(app) }
+    }
 
     /* ----------------------------------------------------------- ofertas */
 

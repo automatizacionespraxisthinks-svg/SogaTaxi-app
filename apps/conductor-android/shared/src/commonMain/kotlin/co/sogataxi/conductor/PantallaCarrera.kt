@@ -229,8 +229,16 @@ private fun BotonDeEtapa(sesion: EstadoSesion, carrera: Carrera) {
             modifier = Modifier.fillMaxWidth().height(72.dp),
         ) { Text("Finalizar en ${s / 60}:${dosDigitos(s % 60)}", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
     } else {
+        // El botón cambia de etapa en el mismo sitio: un doble toque en un
+        // bache marcaba «Llegué» y «Pasajero a bordo» a la vez.
+        var listo by remember(siguiente) { mutableStateOf(false) }
+        LaunchedEffect(siguiente) {
+            delay(1_200)
+            listo = true
+        }
         Button(
-            onClick = { Sesion.etapa(siguiente) },
+            onClick = { if (listo) Sesion.etapa(siguiente) },
+            enabled = listo,
             modifier = Modifier.fillMaxWidth().height(72.dp),
             colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Color.White),
         ) { Text(siguiente.nombre, fontSize = 24.sp, fontWeight = FontWeight.Bold) }

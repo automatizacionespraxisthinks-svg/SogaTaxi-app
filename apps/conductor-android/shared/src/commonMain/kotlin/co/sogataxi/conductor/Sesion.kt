@@ -133,6 +133,16 @@ object Sesion {
              * guarda el resumen se borraría en el instante en que aparece.
              */
             if (antes.fase == Fase.RESUMEN && fase != Fase.CARRERA) return@cambiar base
+            /*
+             * Con etapas de esta carrera todavía en la cola, la API va por
+             * detrás del teléfono: sin esta guarda la pantalla volvía de «En el
+             * lugar» a «Llegué» (o la carrera ya finalizada reaparecía), el
+             * conductor repetía la etapa y la oficina rechazaba el duplicado.
+             */
+            val idActiva = activa?.texto("id")
+            if (idActiva != null && Cola.pendientes().any { it.ruta.startsWith("/v1/driver/rides/$idActiva/") }) {
+                return@cambiar base.copy(fase = antes.fase, carrera = antes.carrera, estadoCarrera = antes.estadoCarrera)
+            }
             if (activa != null) {
                 val carrera = Carrera.deJson(activa)
                 val estadoCarrera = runCatching { EstadoCarrera.valueOf(activa.texto("status")!!) }
@@ -197,7 +207,11 @@ object Sesion {
     suspend fun abrirTurno(placa: String): String? = try {
         Api.post("/v1/driver/shift/open", buildJsonObject { put("plate", placa) })
         Prefs.placa = placa
-        Diagnostico.turnoIniciado()
+        // El turno ya está abierto en la oficina: la fase se adelanta aquí
+        // para que, si `refrescar` falla por señal, un ON_RESUME con la fase
+        // vieja no detenga el servicio recién iniciado. `turnoIniciado` lo
+        // marca el propio motor cuando el servicio arranca de verdad.
+        cambiar { it.copy(fase = Fase.DISPONIBLE, placa = placa) }
         refrescar()
         null
     } catch (e: Exception) {

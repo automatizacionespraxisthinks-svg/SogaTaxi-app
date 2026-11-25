@@ -186,7 +186,7 @@ class PlataformaIos(
     /* ----------------------------------------------------------- ofertas */
 
     /**
-     * Una notificación con el sonido de alarma de la app (`oferta.wav`, 28 s).
+     * Una notificación con el sonido de alarma de la app (`oferta.wav`, 26 s: el «pi-pi» de SogaTaxi repetido).
      * iOS no tiene la «pantalla completa sobre el bloqueo» de Android: el
      * conductor toca el aviso y la oferta está al abrir.
      */

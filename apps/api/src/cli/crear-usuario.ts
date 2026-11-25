@@ -81,7 +81,7 @@ async function main(): Promise<void> {
 
     console.log(`\nUsuario creado: ${name} <${correo}> · ${role}`);
     console.log(`Contraseña temporal (no se vuelve a mostrar, caduca en ${TEMP_PASSWORD_HOURS} h):\n\n  ${password}\n`);
-    console.log('Al entrar al panel le pedirá cambiarla y después activar el segundo factor.');
+    console.log('Al entrar al panel le pedirá cambiarla por una suya.');
   } finally {
     await pool.end();
   }

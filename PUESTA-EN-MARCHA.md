@@ -228,6 +228,23 @@ mete dentro del código al compilar.
 Desplegar de una en una: tres construcciones a la vez pueden agotar la
 memoria.
 
+### Repartir la app a los conductores (sin tiendas)
+
+Un solo enlace para todos: **`https://conductor.sogataxi.praxisia.org/descargar`**.
+La página detecta el teléfono:
+
+- **Android:** descarga `sogataxi-conductor.apk`, firmado, servido por este
+  mismo contenedor (`apps/driver/public/`, con su tipo MIME en
+  `nginx.conf`). Para publicar una versión nueva: compilar el APK, copiarlo
+  a `apps/driver/public/sogataxi-conductor.apk`, desplegar
+  `sogataxi-conductor` y subir en la API `APP_ANDROID_VERSION_CODE`,
+  `APP_ANDROID_VERSION_NAME` y `APP_ANDROID_URL` (ver Paso 3). La app
+  avisa sola a los conductores.
+- **iPhone:** explica cómo añadir la aplicación web a la pantalla de inicio
+  desde Safari. Es la única forma de instalar en iPhone sin App Store ni
+  cuenta de Apple Developer; se ve y se abre como una app y recibe avisos
+  (iOS 16.4+).
+
 ## Paso 6 · Primer arranque
 
 Desde el terminal del contenedor `sogataxi-api` en Dokploy:
@@ -236,8 +253,7 @@ Desde el terminal del contenedor `sogataxi-api` en Dokploy:
 2. Primer administrador:
    `node dist/cli/crear-usuario.js USUARIO "Nombre Apellido" administrador`
    Imprime una contraseña temporal una sola vez.
-3. Entrar a `https://panel.sogataxi.praxisia.org`, cambiar la contraseña y
-   dar de alta el segundo factor. Guardar los diez códigos de respaldo.
+3. Entrar a `https://panel.sogataxi.praxisia.org` y cambiar la contraseña.
 4. Conductores: desde el listado maestro (`DESPLIEGUE.md` §4.4) o uno por uno
    en el panel.
 5. Clave para n8n: `node dist/cli/crear-clave-api.js n8n rides:write rides:read`

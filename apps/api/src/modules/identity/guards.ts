@@ -81,19 +81,7 @@ export class SessionGuard implements CanActivate {
       }
     }
 
-    if (!user.totpEnabled) {
-      const permitida = this.reflector.getAllAndOverride<boolean>(ALLOW_WITHOUT_TOTP, [
-        context.getHandler(),
-        context.getClass(),
-      ]);
-
-      if (!permitida) {
-        throw new AppError(
-          'TOTP_SETUP_REQUIRED',
-          'Activa el segundo factor antes de entrar al panel',
-        );
-      }
-    }
+    // El segundo factor se retiró del panel (25/11/2026): basta la contraseña.
 
     const requerido = this.reflector.getAllAndOverride<Permiso | undefined>(PERMISO_KEY, [
       context.getHandler(),

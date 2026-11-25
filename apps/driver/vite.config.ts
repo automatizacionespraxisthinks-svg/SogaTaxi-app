@@ -49,8 +49,9 @@ export default defineConfig({
       },
       injectManifest: {
         // Las woff2 son Atkinson Hyperlegible: precacheadas, el conductor la
-        // ve también sin conexión y no la que trae su celular.
-        globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        // ve también sin conexión y no la que trae su celular. Y el sonido de
+        // la oferta (oferta.wav, 200 KB), para que suene aunque falle la red.
+        globPatterns: ['**/*.{js,css,html,svg,png,woff2,wav}'],
       },
       // El service worker también en desarrollo: probar los avisos sin él
       // obligaría a compilar en cada cambio.

@@ -532,7 +532,10 @@ export class IdentityService {
     let usedCounter: number | undefined;
     let usedRecoveryCodeId: string | undefined;
 
-    if (user.totpEnabled) {
+    // El panel ya no pide segundo factor (25/11/2026): se ignora aunque la
+    // cuenta lo tuviera activo de antes.
+    const exigirSegundoFactor = false;
+    if (exigirSegundoFactor && user.totpEnabled) {
       if (!secondFactor) {
         throw new AppError('TOTP_REQUIRED', 'Escribe el código de tu aplicación de autenticación');
       }
@@ -784,6 +787,10 @@ export class IdentityService {
    * se adivinan probando, cinco fallos seguidos cierran todas sus sesiones.
    */
   async confirmarConSegundoFactor(tx: Database, userId: string, presented: string | undefined): Promise<void> {
+    // Retirado el segundo factor del panel (25/11/2026): los cambios de
+    // permisos ya no piden código. Siguen valiendo los permisos del rol.
+    const exigirSegundoFactor = false;
+    if (!exigirSegundoFactor) return;
     if (!presented?.trim()) {
       throw new AppError(
         'SECOND_FACTOR_REQUIRED',

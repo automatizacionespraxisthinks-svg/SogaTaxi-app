@@ -48,8 +48,10 @@ export function Oferta({
   useEffect(() => {
     // Vibration API: patrón corto-largo, distinto de una notificación normal.
     // Y el timbre: con la aplicación abierta antes no sonaba nada.
-    navigator.vibrate?.([120, 70, 220]);
-    sonarOferta();
+    // Al ritmo del sonido de SogaTaxi: «pi-pi» de bocina y la campanita.
+    navigator.vibrate?.([160, 100, 300, 400, 700]);
+    // Se calla al contestar, al vencer o si la oficina la retira.
+    return sonarOferta();
   }, [offer.code]);
 
   useEffect(() => {

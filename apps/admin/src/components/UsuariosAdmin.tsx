@@ -8,7 +8,6 @@ import {
   KeyRound,
   MessageSquareText,
   ShieldCheck,
-  ShieldOff,
   UserCog,
   UserMinus,
   UserPlus,
@@ -38,7 +37,7 @@ import {
 } from '@tax/ui';
 import { ApiError, api } from '../api/client';
 import { useSesion } from '../api/queries';
-import { CodigoDeConfirmacion, SelectorDeRol, type RolAsignable } from './Permisos';
+import { SelectorDeRol, type RolAsignable } from './Permisos';
 
 /**
  * Usuarios de la oficina (§8.1). Con «Gestionar usuarios».
@@ -103,9 +102,7 @@ function mensajeParaEnviar(clave: ClaveEntregable): string {
     `Contraseña temporal: ${clave.password}`,
     '',
     `Caduca el ${formatDateTime(clave.expiresAt)}. Al entrar te pedirá elegir una contraseña tuya` +
-      (clave.nueva
-        ? ' y después activar el segundo factor con una aplicación como Google Authenticator en tu teléfono.'
-        : '.'),
+      '.',
   ].join('\n');
 }
 
@@ -154,9 +151,7 @@ function ClaveUnaVez({ clave, onCerrar }: { clave: ClaveEntregable; onCerrar: ()
 
       <Banner tone="info">
         Al entrar tendrá que cambiarla por una suya
-        {clave.nueva
-          ? ', y después activar el segundo factor con su teléfono.'
-          : '. Su segundo factor no se toca, y sus sesiones abiertas quedaron cerradas.'}
+        {clave.nueva ? '.' : '. Sus sesiones abiertas quedaron cerradas.'}
       </Banner>
 
       <div className="flex flex-wrap gap-2">
@@ -195,17 +190,14 @@ function NuevoUsuario({
   const [nombre, setNombre] = useState('');
   const [login, setLogin] = useState('');
   const [rol, setRol] = useState<string>(ROL_OPERADOR);
-  const [codigo, setCodigo] = useState('');
   const [error, setError] = useState<string>();
   const qc = useQueryClient();
 
   const loginValido = isValidLogin(login);
-  // Con el rol de operador, como siempre; con otro, se confirma con el teléfono.
-  const pideCodigo = rol !== ROL_OPERADOR;
   // Los administradores no ocupan cupo.
   const sinCupo = cupoLleno && rol !== ROL_ADMINISTRADOR;
   const puedeCrear =
-    nombre.trim().length >= 3 && loginValido && !sinCupo && (!pideCodigo || codigo.length === 6);
+    nombre.trim().length >= 3 && loginValido && !sinCupo;
 
   const crear = useMutation({
     mutationFn: () =>
@@ -213,14 +205,12 @@ function NuevoUsuario({
         name: nombre.trim(),
         login,
         role: rol,
-        ...(pideCodigo ? { codigo } : {}),
       }),
     onSuccess: async (r) => {
       onCreado({ nombre: nombre.trim(), login: r.login, password: r.password, expiresAt: r.expiresAt, nueva: true });
       await qc.invalidateQueries({ queryKey: ['usuarios'] });
     },
     onError: (causa: unknown) => {
-      setCodigo('');
       setError(causa instanceof ApiError ? causa.message : 'No se pudo crear. Inténtalo de nuevo.');
     },
   });
@@ -275,23 +265,12 @@ function NuevoUsuario({
         </Banner>
       ) : null}
 
-      {pideCodigo ? (
-        <CodigoDeConfirmacion
-          value={codigo}
-          onChange={(c) => {
-            setCodigo(c);
-            setError(undefined);
-          }}
-          onEnter={() => puedeCrear && crear.mutate()}
-        />
-      ) : null}
-
       <ul className="space-y-1.5 rounded-md border border-line p-3 text-caption text-ink-secondary">
         <li>
           Recibirás una contraseña temporal que se muestra una sola vez y caduca a las{' '}
           {TEMP_PASSWORD_HOURS} horas.
         </li>
-        <li>Al entrar, le pedirá cambiarla y después activar el segundo factor.</li>
+        <li>Al entrar, le pedirá cambiarla por una suya.</li>
       </ul>
 
       {error ? <Banner tone="critical">{error}</Banner> : null}
@@ -322,16 +301,15 @@ function CambiarRol({
   onListo: () => void;
 }) {
   const [rol, setRol] = useState(usuario.role);
-  const [codigo, setCodigo] = useState('');
   const [error, setError] = useState<string>();
   const qc = useQueryClient();
   const toast = useToast();
 
   const elegido = roles.find((r) => r.key === rol);
-  const puedeGuardar = rol !== usuario.role && codigo.length === 6;
+  const puedeGuardar = rol !== usuario.role;
 
   const guardar = useMutation({
-    mutationFn: () => api.patch(`/v1/admin/users/${usuario.id}/role`, { role: rol, codigo }),
+    mutationFn: () => api.patch(`/v1/admin/users/${usuario.id}/role`, { role: rol }),
     onSuccess: async () => {
       toast.push({
         tone: 'positive',
@@ -345,7 +323,6 @@ function CambiarRol({
       onListo();
     },
     onError: (causa: unknown) => {
-      setCodigo('');
       setError(causa instanceof ApiError ? causa.message : 'No se pudo cambiar. Inténtalo de nuevo.');
     },
   });
@@ -361,17 +338,6 @@ function CambiarRol({
           setError(undefined);
         }}
       />
-
-      {rol !== usuario.role ? (
-        <CodigoDeConfirmacion
-          value={codigo}
-          onChange={(c) => {
-            setCodigo(c);
-            setError(undefined);
-          }}
-          onEnter={() => puedeGuardar && guardar.mutate()}
-        />
-      ) : null}
 
       {error ? <Banner tone="critical">{error}</Banner> : null}
 
@@ -534,18 +500,8 @@ export function UsuariosAdmin() {
                     ) : u.temporaryPassword ? (
                       <PildoraTemporal temporal={u.temporaryPassword} />
                     ) : (
-                      // El 2FA se enseña porque es lo que decide si esa persona
-                      // puede usar el panel: sin él, el servidor no la deja pasar.
-                      <StatusPill tone={u.totpEnabled ? 'positive' : 'warning'}>
-                        {u.totpEnabled ? (
-                          <>
-                            <ShieldCheck className="size-3" /> 2FA
-                          </>
-                        ) : (
-                          <>
-                            <ShieldOff className="size-3" /> sin 2FA
-                          </>
-                        )}
+                      <StatusPill tone="positive">
+                        <ShieldCheck className="size-3" /> activo
                       </StatusPill>
                     )}
 
@@ -608,8 +564,7 @@ export function UsuariosAdmin() {
 
         <p className="text-micro text-ink-muted">
           Solo puedes gestionar a quien no tenga más permisos que tú, y nadie se cambia el rol a sí
-          mismo. Reiniciar un segundo factor perdido se hace desde el terminal del servidor: junto con
-          la contraseña, permitiría entrar en la cuenta de otro.
+          mismo.
         </p>
       </Card>
 
@@ -659,10 +614,6 @@ export function UsuariosAdmin() {
             <ul className="space-y-2 rounded-md border border-line p-3 text-base text-ink-secondary">
               <li>Sus sesiones abiertas se cerrarán.</li>
               <li>Al entrar tendrá que cambiarla por una suya.</li>
-              <li>
-                Su segundo factor {panel.usuario.totpEnabled ? 'sigue activo' : 'sigue sin activarse'}:
-                no se toca desde aquí.
-              </li>
               <li>La contraseña anterior deja de servir de inmediato.</li>
             </ul>
 

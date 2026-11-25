@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- La versión de depuración convive con la final: que no se confundan. -->
+<resources>
+    <string name="app_name">SogaTaxi PRUEBAS</string>
+    <string name="nombre_en_lanzador">SogaTaxi PRUEBAS</string>
+</resources>

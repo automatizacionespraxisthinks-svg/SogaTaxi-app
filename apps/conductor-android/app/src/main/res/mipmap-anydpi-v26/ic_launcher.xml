@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Ícono adaptativo: Samsung, OPPO y Xiaomi encogían el PNG redondo dentro de
+  una placa blanca. El logo va con margen para que la máscara del lanzador
+  (círculo, gota o cuadrado) no lo recorte; la capa monocroma es la de los
+  íconos temáticos de Android 13+.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@android:color/white" />
+    <foreground>
+        <inset android:drawable="@drawable/ic_launcher_logo" android:inset="9%" />
+    </foreground>
+    <monochrome>
+        <inset android:drawable="@drawable/ic_notificacion" android:inset="26%" />
+    </monochrome>
+</adaptive-icon>

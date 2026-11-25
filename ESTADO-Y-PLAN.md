@@ -299,6 +299,41 @@ app y su propia instalación. Este repositorio es solo SogaTaxi.
     de permisos anotadas arriba.
   - Desplegar en el VPS y repetir allá la prueba de carga.
 
+## Revisión del 25/11 (tarde, local, sin commit)
+
+- **Segundo factor retirado del panel.** Se entra con usuario y
+  contraseña. Ya no se pide el código al dar roles ni al cambiar permisos
+  (`confirmarConSegundoFactor` no hace nada). El socket de la oficina ya no
+  lo exige. Las columnas TOTP siguen en la base, sin uso.
+  - Se borró `e2e-totp.ts`.
+  - Hay que actualizar `e2e-alta-operadores`, `e2e-usuarios` y
+    `e2e-roles-y-permisos`: todavía esperan `TOTP_*` y
+    `SECOND_FACTOR_*`.
+- **App Android 0.4.0 (código 4), firmada.**
+  - Llave en `apps/conductor-android/firma/` (fuera de git) y contraseña en
+    `keystore.properties`. Guardar las dos fuera de este equipo.
+  - Arreglos:
+    - La app ya no se cae si se bloquea el teléfono justo al iniciar el turno.
+    - La oferta también se ve dentro de la app.
+    - La pantalla de la oferta respeta las barras de Android 15.
+    - No se acepta dos veces, y una oferta rechazada no vuelve a sonar.
+    - Hay que esperar 1,2 s entre etapas.
+    - Las etapas en cola no retroceden la pantalla.
+    - El GPS se apaga si la API confirma que no hay turno.
+    - El token queda en memoria.
+    - Un error de certificado pide revisar la fecha del teléfono.
+    - Al volver de Ajustes se refrescan los permisos, y se abren los ajustes
+      si se negaron dos veces.
+    - Se revisan también el GPS encendido, el volumen de alarma y el canal de
+      ofertas.
+    - Ícono adaptativo, y «SogaTaxi PRUEBAS» en la versión de depuración.
+  - **Sin probar en un teléfono.** No se compiló el código de iPhone
+    (`compileKotlinIosArm64`).
+- **Reparto sin tiendas:** `conductor.sogataxi.praxisia.org/descargar`
+  sirve el APK en Android y guía en iPhone la instalación de la PWA desde
+  Safari. **Falta desplegar `sogataxi-conductor`**: hoy ese subdominio no
+  responde (solo devuelve el certificado por defecto de Traefik).
+
 ## 3. Ruta propuesta
 
 **Fase 0 — Entorno y repositorio**

@@ -96,7 +96,7 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
             ? await this.identity.resolveDriverToken(credencial.token)
             : await this.identity
                 .resolveSession(credencial.token)
-                .then((u) => (u && !u.mustChangePassword && u.totpEnabled ? u : null));
+                .then((u) => (u && !u.mustChangePassword ? u : null));
         if (!vale) {
           socket.emit('session:closed', { motivo: 'Tu sesión ya no está activa. Vuelve a entrar.' });
           socket.disconnect(true);
@@ -131,7 +131,7 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
        * o con la contraseña temporal sin cambiar, la API no deja ver nada, y
        * el socket le daba en vivo carreras, posiciones y alertas.
        */
-      if (user && !user.mustChangePassword && user.totpEnabled) {
+      if (user && !user.mustChangePassword) {
         await client.join('office');
         client.data.principal = user;
         client.data.credencial = { tipo: 'oficina', token: session! };

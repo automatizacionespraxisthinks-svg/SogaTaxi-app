@@ -97,7 +97,7 @@ export class AdminUsersController {
       email,
       password,
       expiresAt,
-      aviso: 'Esta contraseña no se vuelve a mostrar. Al entrar tendrá que cambiarla; su segundo factor sigue activo.',
+      aviso: 'Esta contraseña no se vuelve a mostrar. Al entrar tendrá que cambiarla.',
     };
   }
 }

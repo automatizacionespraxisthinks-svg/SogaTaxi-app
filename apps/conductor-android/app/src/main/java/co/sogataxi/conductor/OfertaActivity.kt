@@ -7,9 +7,14 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
 
 /**
  * La oferta a pantalla completa: se enciende sola y queda encima del
@@ -29,7 +34,9 @@ class OfertaActivity : ComponentActivity() {
             )
         }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        atender(intent)
+        // Recreada (al girar o al cambiar el tema) no vuelve a mandar el
+        // «aceptar» del botón de la notificación.
+        if (savedInstanceState == null) atender(intent)
 
         setContent {
             TemaSogaTaxi {
@@ -38,14 +45,18 @@ class OfertaActivity : ComponentActivity() {
                 if (actual == null) {
                     LaunchedEffect(Unit) { finish() }
                 } else {
-                    PantallaOferta(
-                        oferta = actual,
-                        alAceptar = { aceptar(actual.rideId) },
-                        alRechazar = {
-                            Ofertas.rechazar(actual.rideId)
-                            finish()
-                        },
-                    )
+                    // Android 15 dibuja de borde a borde: sin este margen,
+                    // «Rechazar» quedaba bajo la barra de botones del sistema.
+                    Box(Modifier.fillMaxSize().background(Marca.tinta).safeDrawingPadding()) {
+                        PantallaOferta(
+                            oferta = actual,
+                            alAceptar = { aceptar(actual.rideId) },
+                            alRechazar = {
+                                Ofertas.rechazar(actual.rideId)
+                                finish()
+                            },
+                        )
+                    }
                 }
             }
         }

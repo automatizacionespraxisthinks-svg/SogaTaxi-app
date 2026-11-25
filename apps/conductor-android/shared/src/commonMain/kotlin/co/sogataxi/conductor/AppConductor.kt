@@ -24,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -86,6 +87,20 @@ private fun Raiz() {
             Sesion.refrescar()
             alinearTurno(Sesion.flujo.value.fase, Diagnostico.flujo.value.turnoDesde != null)
             Actualizacion.revisar()
+        }
+    }
+
+    // Cada vez que cambia la fase con la app en pantalla. No depende del
+    // callback de «Iniciar turno»: al abrirlo la fase cambia, esa pantalla
+    // se desmonta y su corrutina se cancela antes de poder llamarlo. La
+    // primera composición se salta: la fase guardada puede ser vieja y la
+    // alinea ON_RESUME después de preguntar a la API.
+    val primeraFase = remember { mutableStateOf(true) }
+    LaunchedEffect(sesion.fase) {
+        if (primeraFase.value) {
+            primeraFase.value = false
+        } else {
+            alinearTurno(sesion.fase, Diagnostico.flujo.value.turnoDesde != null)
         }
     }
 
@@ -206,6 +221,8 @@ private fun AvisoDeVersion(version: VersionNueva) {
 @Composable
 fun PantallaOferta(oferta: OfertaDeCarrera, alAceptar: () -> Unit, alRechazar: () -> Unit) {
     val restante = remember { mutableLongStateOf(0L) }
+    val aceptando by Ofertas.aceptando.collectAsState()
+    val ocupada = aceptando == oferta.rideId
     LaunchedEffect(oferta.rideId) {
         while (true) {
             restante.longValue = ((oferta.venceEn - ahoraMs()) / 1000).coerceAtLeast(0)
@@ -252,12 +269,17 @@ fun PantallaOferta(oferta: OfertaDeCarrera, alAceptar: () -> Unit, alRechazar: (
             Spacer(Modifier.height(16.dp))
             Button(
                 onClick = alAceptar,
+                enabled = !ocupada,
                 modifier = Modifier.fillMaxWidth().height(88.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Marca.amarillo, contentColor = Marca.tinta),
-            ) { Text("ACEPTAR", fontSize = 28.sp, fontWeight = FontWeight.Bold) }
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Marca.amarillo, contentColor = Marca.tinta,
+                    disabledContainerColor = Marca.amarillo.copy(alpha = 0.6f), disabledContentColor = Marca.tinta,
+                ),
+            ) { Text(if (ocupada) "Aceptando…" else "ACEPTAR", fontSize = 28.sp, fontWeight = FontWeight.Bold) }
             Spacer(Modifier.height(12.dp))
             OutlinedButton(
                 onClick = alRechazar,
+                enabled = !ocupada,
                 modifier = Modifier.fillMaxWidth().height(56.dp),
             ) { Text("Rechazar", color = Marca.sobreTinta, fontSize = 18.sp) }
         }

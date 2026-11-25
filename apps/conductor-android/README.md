@@ -100,6 +100,15 @@ cd apps\conductor-android; .\gradlew.bat :app:assembleDebug
 El APK queda en `app\build\outputs\apk\debug\app-debug.apk`. Se instala con
 `adb install -r` o copiándolo al teléfono.
 
+Si el proyecto está en OneDrive, compila fuera de él: OneDrive bloquea los
+`.dex` mientras Gradle los escribe y la compilación falla. Antes de `gradlew`:
+`$env:SOGATAXI_BUILD_DIR = "$env:LOCALAPPDATA\sogataxi-build"`. Los APK quedan
+entonces en esa carpeta (`app\outputs\apk\...`).
+
+El sonido de las ofertas (`res/raw/oferta_sogataxi.wav`: «pi-pi» de bocina y
+campanita) sale de `apps/driver/scripts/generar-sonido.mjs`, que escribe también
+el de la PWA y el de iPhone: `node apps/driver/scripts/generar-sonido.mjs`.
+
 Antes de dar por bueno un cambio, todo lo que se puede comprobar en Windows:
 
 ```powershell
