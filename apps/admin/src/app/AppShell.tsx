@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import {
   Ban,
   BarChart3,
+  BellRing,
   CircleDot,
   LayoutGrid,
   LogOut,
@@ -12,6 +13,7 @@ import {
   Map,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   Route as RouteIcon,
   ServerCog,
   Smartphone,
@@ -23,8 +25,9 @@ import { WAHA_STATUS_LABEL, WAHA_STATUS_TONE, formatTime, type Permiso, type Sta
 import { Banner, LiveDot, StatusPill, cn, spring, transition } from '@tax/ui';
 import { actions, useLive, type AlertaRecibida } from '../live/store';
 import { api } from '../api/client';
-import { usePuede, useSesion } from '../api/queries';
+import { useAvisosDeFlota, usePuede, useSesion } from '../api/queries';
 import { CambiarClave } from '../components/CambiarClave';
+import { NuevaCarrera } from '../components/NuevaCarrera';
 import { GeocodificadorCaido, IndicadorDeDirecciones } from '../components/Geocodificador';
 import logo from '../assets/logo-sogataxi.png';
 
@@ -42,6 +45,7 @@ const NAV: NavItem[] = [
   { to: '/carreras', label: 'Carreras', icon: RouteIcon },
   { to: '/flota', label: 'Flota', icon: Users },
   { to: '/zonas', label: 'Zonas', icon: Map },
+  { to: '/avisos', label: 'Avisos', icon: BellRing },
   { to: '/reportes', label: 'Reportes', icon: BarChart3, permisos: ['reportes.ver'] },
   {
     to: '/sistema',
@@ -56,6 +60,7 @@ const TITLES: Record<string, string> = {
   '/carreras': 'Carreras',
   '/flota': 'Flota',
   '/zonas': 'Zonas',
+  '/avisos': 'Avisos de la flota',
   '/reportes': 'Reportes',
   '/sistema': 'Sistema',
 };
@@ -66,6 +71,24 @@ export function AppShell({ children, userName }: { children: ReactNode; userName
   const connected = useLive((s) => s.connected);
   const unassigned = useLive((s) => s.rides.filter((r) => r.status === 'UNASSIGNED').length);
   const pending = useLive((s) => s.rides.filter((r) => r.status === 'PENDING' || r.status === 'NOTIFIED').length);
+
+  /*
+   * Los avisos rojos se pueden quitar (26/11/2026): tapaban la pantalla
+   * mientras la operadora atendía otra cosa. Quitarlos no los apaga para
+   * siempre: vuelven si la situación empeora o se repite.
+   *  - «Sin conexión»: vuelve en la siguiente caída.
+   *  - «Sin asignar»: vuelve cuando hay más carreras sin asignar que las que
+   *    había al quitarlo.
+   */
+  const [sinConexionOculto, setSinConexionOculto] = useState(false);
+  useEffect(() => {
+    if (connected) setSinConexionOculto(false);
+  }, [connected]);
+  const [sinAsignarVistas, setSinAsignarVistas] = useState(0);
+  useEffect(() => {
+    // Si bajan, el listón baja con ellas: la próxima que quede sin asignar avisa.
+    if (unassigned < sinAsignarVistas) setSinAsignarVistas(unassigned);
+  }, [unassigned, sinAsignarVistas]);
 
   const title = TITLES[`/${location.pathname.split('/')[1] ?? ''}`] ?? TITLES[location.pathname] ?? 'Operación';
 
@@ -82,7 +105,7 @@ export function AppShell({ children, userName }: { children: ReactNode; userName
         <TopBar title={title} />
 
         <AnimatePresence>
-          {!connected ? (
+          {!connected && !sinConexionOculto ? (
             <motion.div
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: 'auto', opacity: 1 }}
@@ -90,25 +113,33 @@ export function AppShell({ children, userName }: { children: ReactNode; userName
               transition={transition.base}
               className="overflow-hidden px-5"
             >
-              <Banner tone="critical" icon={<WifiOff className="size-4" />} className="mt-3">
+              <Banner
+                tone="critical"
+                icon={<WifiOff className="size-4" />}
+                className="mt-3"
+                action={<QuitarAviso onClick={() => setSinConexionOculto(true)} />}
+              >
                 Sin conexión con el servidor. Las acciones quedan en espera y se reintentan al volver.
               </Banner>
             </motion.div>
           ) : null}
         </AnimatePresence>
 
-        {unassigned > 0 ? (
+        {unassigned > sinAsignarVistas ? (
           <div className="px-5 pt-3">
             <Banner
               tone="critical"
               icon={<CircleDot className="size-4" />}
               action={
-                <NavLink
-                  to="/carreras"
-                  className="text-caption font-medium underline underline-offset-2"
-                >
-                  Ver carreras
-                </NavLink>
+                <span className="flex items-center gap-1">
+                  <NavLink
+                    to="/carreras"
+                    className="text-caption font-medium underline underline-offset-2"
+                  >
+                    Ver carreras
+                  </NavLink>
+                  <QuitarAviso onClick={() => setSinAsignarVistas(unassigned)} />
+                </span>
               }
             >
               <span className="font-medium">
@@ -131,6 +162,21 @@ export function AppShell({ children, userName }: { children: ReactNode; userName
 
 /* ---------------------------------------------------------------- avisos --- */
 
+/** La X de un aviso: lo quita de la pantalla hasta que la situación cambie. */
+function QuitarAviso({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="Quitar este aviso"
+      title="Quitar este aviso"
+      className="grid size-8 shrink-0 place-items-center rounded-md transition-colors duration-150 hover:bg-black/15 focus-visible:outline-2 focus-visible:outline-current"
+    >
+      <X className="size-4" />
+    </button>
+  );
+}
+
 /**
  * Una o más líneas de WhatsApp que no atienden. Es un estado, no un aviso:
  * se queda mientras dure y se va sola cuando el monitor la ve volver. La
@@ -140,7 +186,9 @@ export function AppShell({ children, userName }: { children: ReactNode; userName
 function LineasCaidas() {
   const sesiones = useLive((s) => s.wahaSessions);
   const caidas = sesiones.filter((sesion) => !sesion.connected);
-  if (caidas.length === 0) return null;
+  const huella = caidas.map((sesion) => sesion.id).sort().join('|');
+  const [quitado, setQuitado] = useState('');
+  if (caidas.length === 0 || quitado === huella) return null;
 
   const [primera] = caidas;
   return (
@@ -149,9 +197,12 @@ function LineasCaidas() {
         tone="critical"
         icon={<Smartphone className="size-4" />}
         action={
-          <NavLink to="/sistema" className="text-caption font-medium underline underline-offset-2">
-            Ver líneas
-          </NavLink>
+          <span className="flex items-center gap-1">
+            <NavLink to="/sistema" className="text-caption font-medium underline underline-offset-2">
+              Ver líneas
+            </NavLink>
+            <QuitarAviso onClick={() => setQuitado(huella)} />
+          </span>
         }
       >
         <span className="font-medium">
@@ -254,6 +305,8 @@ function Sidebar({
 }) {
   const puede = usePuede();
   const rol = useSesion().data?.user.roleName;
+  // El número del menú: solo lo vencido, que es lo que no puede esperar.
+  const avisosUrgentes = useAvisosDeFlota().data?.urgentes ?? 0;
   const initials = userName
     .split(' ')
     .slice(0, 2)
@@ -298,7 +351,13 @@ function Sidebar({
             key={item.to}
             item={item}
             collapsed={collapsed}
-            badge={item.to === '/carreras' && pending > 0 ? pending : undefined}
+            badge={
+              item.to === '/carreras' && pending > 0
+                ? pending
+                : item.to === '/avisos' && avisosUrgentes > 0
+                  ? avisosUrgentes
+                  : undefined
+            }
           />
         ))}
       </nav>
@@ -439,6 +498,26 @@ function TopBar({ title }: { title: string }) {
   const connected = useLive((s) => s.connected);
   const wahaSessions = useLive((s) => s.wahaSessions);
 
+  /*
+   * «Nueva carrera» vive en la barra de arriba, no en una página (26/11/2026):
+   * es lo que más usa la oficina —cada llamada es una carrera— y antes solo
+   * estaba en Operación. Con F2 se abre desde cualquier parte sin soltar el
+   * teclado, que es como se atiende el teléfono.
+   */
+  const puede = usePuede();
+  const puedeCrear = puede('carreras.crear');
+  const [creando, setCreando] = useState(false);
+  useEffect(() => {
+    if (!puedeCrear) return;
+    const alPulsar = (e: KeyboardEvent) => {
+      if (e.key !== 'F2' || e.ctrlKey || e.altKey || e.metaKey) return;
+      e.preventDefault();
+      setCreando(true);
+    };
+    window.addEventListener('keydown', alPulsar);
+    return () => window.removeEventListener('keydown', alPulsar);
+  }, [puedeCrear]);
+
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 15_000);
     return () => window.clearInterval(id);
@@ -454,6 +533,21 @@ function TopBar({ title }: { title: string }) {
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
+        {puedeCrear ? (
+          <>
+            <button
+              type="button"
+              onClick={() => setCreando(true)}
+              title="Registrar la carrera de un cliente que llamó (F2)"
+              className="flex items-center gap-1.5 rounded-md bg-on-brand px-3 py-1.5 text-base font-semibold text-brand shadow-sm transition-transform duration-150 hover:scale-[1.03] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-on-brand"
+            >
+              <Plus className="size-4" />
+              Nueva carrera
+              <kbd className="ml-1 rounded border border-current px-1 text-micro font-medium opacity-70">F2</kbd>
+            </button>
+            <NuevaCarrera open={creando} onClose={() => setCreando(false)} />
+          </>
+        ) : null}
         <div className="hidden items-center gap-1.5 lg:flex">
           {wahaSessions.map((session) => (
             <StatusPill

@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { FleetService } from './fleet.service';
 import { FleetController } from './fleet.controller';
-import { AdminFleetController, AdminVehiclesController } from './admin-fleet.controller';
+import { AdminCamposExtraController, AdminFleetController, AdminVehiclesController } from './admin-fleet.controller';
 import { FleetAdminService } from './fleet-admin.service';
 import { PricingModule } from '../pricing/pricing.module';
+import { AvisosDeFlotaController, AvisosDeFlotaService } from './avisos-flota';
 
 /**
  * Flota.
@@ -13,8 +14,8 @@ import { PricingModule } from '../pricing/pricing.module';
  */
 @Module({
   imports: [PricingModule],
-  providers: [FleetService, FleetAdminService],
-  controllers: [FleetController, AdminFleetController, AdminVehiclesController],
+  providers: [FleetService, FleetAdminService, AvisosDeFlotaService],
+  controllers: [FleetController, AdminFleetController, AdminVehiclesController, AdminCamposExtraController, AvisosDeFlotaController],
   exports: [FleetService, FleetAdminService],
 })
 export class FleetModule {}

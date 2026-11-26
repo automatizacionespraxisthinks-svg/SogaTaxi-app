@@ -35,7 +35,8 @@ import { zoneOf } from '../live/store';
 import { usePuede } from '../api/queries';
 import { useCifrasDeHoy } from '../api/informes';
 import { GestionConductor, NuevoConductorBoton } from '../components/ConductorAdmin';
-import { VehiculosAdmin } from '../components/VehiculosAdmin';
+import { VehiculosAdmin, useVehiculos } from '../components/VehiculosAdmin';
+import { GestionCamposExtra } from '../components/CamposExtra';
 import { CENTRO_DEL_MAPA } from '../map/style';
 
 type Filter = 'turno' | 'disponibles' | 'carrera' | 'todos' | 'atencion';
@@ -65,7 +66,7 @@ export function Flota() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Conductores o vehículos (18/11/2026): los vehículos se eligen como
   // permitidos de cada conductor, así que viven aquí al lado.
-  const [vista, setVista] = useState<'conductores' | 'vehiculos'>('conductores');
+  const [vista, setVista] = useState<'conductores' | 'vehiculos' | 'campos'>('conductores');
 
   // Solo cortesía: quien autoriza es el guardia de la API, que exige el
   // permiso. Enseñar un botón que siempre falla es peor que ocultarlo.
@@ -121,6 +122,18 @@ export function Flota() {
     (d) => d.status !== 'OFF_SHIFT' && (d.positionAgeSeconds ?? 0) > 60,
   ).length;
 
+  /*
+   * Conductores y vehículos son dos cuentas distintas (26/11/2026). La
+   * tarjeta decía «Flota vinculada · Vehículos habilitados» y mostraba el
+   * número de conductores: con 683 conductores y 368 carros, no cuadraba con
+   * nada. Solo cuentan los activos; los desactivados van en la pista.
+   */
+  const conductoresActivos = drivers.filter((d) => d.active !== false).length;
+  const conductoresInactivos = drivers.length - conductoresActivos;
+  const vehiculos = useVehiculos().data ?? [];
+  const vehiculosActivos = vehiculos.filter((v) => v.active).length;
+  const vehiculosInactivos = vehiculos.length - vehiculosActivos;
+
   return (
     <div className="space-y-4 p-5">
       <Tabs
@@ -129,15 +142,27 @@ export function Flota() {
         options={[
           { value: 'conductores', label: 'Conductores' },
           { value: 'vehiculos', label: 'Vehículos' },
+          { value: 'campos', label: 'Campos adicionales' },
         ]}
       />
 
-      {vista === 'vehiculos' ? (
+      {vista === 'campos' ? (
+        <GestionCamposExtra gestionar={gestionar} />
+      ) : vista === 'vehiculos' ? (
         <VehiculosAdmin gestionar={gestionar} />
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            <Stat label="Flota vinculada" value={drivers.length} hint="Vehículos habilitados" />
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <Stat
+              label="Conductores"
+              value={conductoresActivos}
+              hint={conductoresInactivos > 0 ? `Activos · ${conductoresInactivos} desactivados` : 'Activos'}
+            />
+            <Stat
+              label="Vehículos"
+              value={vehiculosActivos}
+              hint={vehiculosInactivos > 0 ? `Activos · ${vehiculosInactivos} desactivados` : 'Activos'}
+            />
             <Stat label="En turno" value={counts.turno} tone="info" hint="GPS activo durante el turno" />
             <Stat label="Disponibles" value={counts.disponibles} tone="positive" hint="Candidatos a oleada" />
             <Stat

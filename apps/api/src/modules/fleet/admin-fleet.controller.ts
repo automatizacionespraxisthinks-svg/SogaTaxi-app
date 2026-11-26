@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { VEHICLE_TYPES, suspensionSchema, type Suspension } from '@tax/shared';
+import { VEHICLE_TYPES, fechaIsoValida, suspensionSchema, type Suspension } from '@tax/shared';
 import { zodBody } from '../../common/zod.pipe';
 import { RequierePermiso, SessionGuard } from '../identity/guards';
 import { FleetService } from './fleet.service';
@@ -45,12 +45,24 @@ const nuevoVehiculoSchema = z.object({
   capacity: z.number().int().min(1).max(20).optional(),
 });
 
+/** `AAAA-MM-DD` que existe de verdad; nula borra la fecha. */
+const fecha = z.string().refine(fechaIsoValida, 'Esa fecha no existe: va como AAAA-MM-DD');
+/** Valores de campos adicionales, por id del campo. */
+const extraSchema = z.record(z.string().uuid(), z.string().max(200));
+
 const cambiosVehiculoSchema = z
   .object({
+    plate: z.string().trim().min(5, 'La placa tiene al menos 5 caracteres').max(10).optional(),
     internalNumber: z.string().trim().max(10).nullable().optional(),
     type: z.enum(VEHICLE_TYPES).optional(),
     capacity: z.number().int().min(1).max(20).optional(),
     active: z.boolean().optional(),
+    brand: z.string().trim().max(60).nullable().optional(),
+    modelYear: z.number().int().min(1980).max(2035).nullable().optional(),
+    ownerName: z.string().trim().max(120).nullable().optional(),
+    soatExpiresOn: fecha.nullable().optional(),
+    rtoExpiresOn: fecha.nullable().optional(),
+    extra: extraSchema.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, 'No hay nada que cambiar');
 
@@ -63,7 +75,20 @@ const cambiosSchema = z
     esPrueba: z.boolean().optional(),
     /** Recibe pagos electrónicos: solo a estos les llegan esas carreras. */
     aceptaPagoElectronico: z.boolean().optional(),
+    cedula: z.string().trim().regex(/^\d{6,10}$/, 'La cédula son entre 6 y 10 dígitos, sin puntos').optional(),
+    licenseExpiresOn: fecha.nullable().optional(),
+    licenseRestriction: z.string().trim().max(120).nullable().optional(),
+    extra: extraSchema.optional(),
   })
+  .refine((v) => Object.keys(v).length > 0, 'No hay nada que cambiar');
+
+const nuevoCampoExtraSchema = z.object({
+  entidad: z.enum(['conductor', 'vehiculo']),
+  nombre: z.string().trim().min(2, 'Escriba el nombre del campo').max(40),
+  tipo: z.enum(['texto', 'numero', 'fecha']).default('texto'),
+});
+const cambiosCampoExtraSchema = z
+  .object({ nombre: z.string().trim().min(2).max(40).optional(), activo: z.boolean().optional() })
   .refine((v) => Object.keys(v).length > 0, 'No hay nada que cambiar');
 
 const eliminarSchema = z.object({
@@ -244,5 +269,38 @@ export class AdminVehiclesController {
     @Body(zodBody(cambiosVehiculoSchema)) body: z.infer<typeof cambiosVehiculoSchema>,
   ) {
     await this.admin.editarVehiculo(vehicleId, body, actorDe(request));
+  }
+}
+
+/**
+ * Campos adicionales (26/11/2026): los datos que la oficina quiere guardar de
+ * los conductores o de los vehículos y que el sistema no trae. Los ve
+ * cualquiera; crearlos o cambiarlos es de quien gestiona conductores.
+ */
+@Controller('v1/admin/campos-extra')
+@UseGuards(SessionGuard)
+export class AdminCamposExtraController {
+  constructor(private readonly admin: FleetAdminService) {}
+
+  @Get()
+  list() {
+    return this.admin.listarCamposExtra();
+  }
+
+  @Post()
+  @RequierePermiso('conductores.gestionar')
+  crear(@Req() request: FastifyRequest, @Body(zodBody(nuevoCampoExtraSchema)) body: z.infer<typeof nuevoCampoExtraSchema>) {
+    return this.admin.crearCampoExtra(body, actorDe(request));
+  }
+
+  @Patch(':campoId')
+  @RequierePermiso('conductores.gestionar')
+  @HttpCode(204)
+  async cambiar(
+    @Req() request: FastifyRequest,
+    @Param('campoId', ParseUUIDPipe) campoId: string,
+    @Body(zodBody(cambiosCampoExtraSchema)) body: z.infer<typeof cambiosCampoExtraSchema>,
+  ) {
+    await this.admin.cambiarCampoExtra(campoId, body, actorDe(request));
   }
 }

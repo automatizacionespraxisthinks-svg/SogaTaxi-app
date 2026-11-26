@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Crosshair, MapPin, Plus, Radar, Save } from 'lucide-react';
-import type { Place, WaveConfig, Zone } from '@tax/shared';
-import { cambiosZonaSchema } from '@tax/shared';
+import type { AjustesDespacho, Place, Zone } from '@tax/shared';
+import { AJUSTES_DESPACHO_DE_FABRICA, ajustesDespachoSchema } from '@tax/shared';
 import {
   Button,
   Card,
@@ -10,7 +10,6 @@ import {
   EmptyState,
   Field,
   Input,
-  SectionLabel,
   StatusPill,
   Tabs,
   staggerItem,
@@ -28,13 +27,14 @@ type Tab = 'zonas' | 'lugares';
 /**
  * Zonas y lugares.
  *
- * Las zonas son los círculos donde hay servicio, cada uno con sus oleadas;
- * los lugares, los sitios que los clientes nombran sin dirección («la
+ * Arriba, los ajustes del despacho: una sola regla para toda la ciudad, por
+ * cercanía. Las zonas son los barrios y las veredas, y sirven para las
+ * estadísticas: no deciden a quién se le avisa. Los lugares, los sitios que los clientes nombran sin dirección («la
  * terminal»), con las palabras clave con que el asistente los reconoce. Los
  * dos se crean aquí, en una ventana sobre la vista.
  *
- * Crear una zona o cambiar sus oleadas pide «Gestionar zonas y oleadas»:
- * cambia cómo se despacha. Los lugares, «Gestionar lugares». Sin ellos, las
+ * Crear una zona o cambiar los ajustes del despacho pide «Gestionar zonas y
+ * oleadas»: cambia cómo se despacha. Los lugares, «Gestionar lugares». Sin ellos, las
  * dos pestañas se ven pero no se tocan.
  */
 export function Zonas() {
@@ -55,7 +55,7 @@ export function Zonas() {
           value={tab}
           onChange={setTab}
           options={[
-            { value: 'zonas', label: 'Zonas y oleadas', count: zoneCount },
+            { value: 'zonas', label: 'Zonas y despacho', count: zoneCount },
             { value: 'lugares', label: 'Catálogo de lugares', count: places.data?.length },
           ]}
         />
@@ -108,24 +108,214 @@ function ZonasYOleadas({ editable }: { editable: boolean }) {
   const [editing, setEditing] = useState<string | null>(null);
 
   return (
-    <motion.div
-      variants={staggerList(zones.length)}
-      initial="hidden"
-      animate="visible"
-      className="grid gap-3 lg:grid-cols-2"
-    >
-      {zones.map((zone) => (
-        <motion.div key={zone.id} variants={staggerItem}>
-          <TarjetaZona
-            zone={zone}
-            editable={editable}
-            open={editing === zone.id}
-            onToggle={() => setEditing(editing === zone.id ? null : zone.id)}
-            onClose={() => setEditing(null)}
-          />
-        </motion.div>
-      ))}
-    </motion.div>
+    <div className="space-y-3">
+      <TarjetaDespacho editable={editable} />
+      <motion.div
+        variants={staggerList(zones.length)}
+        initial="hidden"
+        animate="visible"
+        className="grid gap-3 lg:grid-cols-2"
+      >
+        {zones.map((zone) => (
+          <motion.div key={zone.id} variants={staggerItem}>
+            <TarjetaZona
+              zone={zone}
+              editable={editable}
+              open={editing === zone.id}
+              onToggle={() => setEditing(editing === zone.id ? null : zone.id)}
+            />
+          </motion.div>
+        ))}
+      </motion.div>
+    </div>
+  );
+}
+
+/**
+ * Los ajustes del despacho de toda la ciudad (26/11/2026).
+ *
+ * El despacho es por cercanía y no depende de la zona: cada ronda avisa a
+ * todos los taxis disponibles dentro de su rango y se la lleva el primero que
+ * acepta; si nadie la toma, el rango se amplía. Antes cada zona tenía sus
+ * propias oleadas; ahora es una sola regla y vive aquí.
+ */
+function TarjetaDespacho({ editable }: { editable: boolean }) {
+  const { push } = useToast();
+  const [guardados, setGuardados] = useState<AjustesDespacho | null>(null);
+  const [ajustes, setAjustes] = useState<AjustesDespacho>(AJUSTES_DESPACHO_DE_FABRICA);
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let vivo = true;
+    api
+      .get<AjustesDespacho>('/v1/admin/dispatch')
+      .then((datos) => {
+        if (!vivo) return;
+        setGuardados(datos);
+        setAjustes(datos);
+      })
+      .catch((causa: unknown) => {
+        if (vivo) setError(causa instanceof ApiError ? causa.message : 'No se pudieron leer los ajustes.');
+      });
+    return () => {
+      vivo = false;
+    };
+  }, []);
+
+  const ronda = (wave: 1 | 2 | 3, cambio: { radiusKm?: number; timeoutSeconds?: number }) =>
+    setAjustes((a) => ({ ...a, rondas: a.rondas.map((r) => (r.wave === wave ? { ...r, ...cambio } : r)) }));
+  const lejanos = (cambio: Partial<AjustesDespacho['lejanos']>) =>
+    setAjustes((a) => ({ ...a, lejanos: { ...a.lejanos, ...cambio } }));
+
+  const sinCambios = guardados !== null && JSON.stringify(guardados) === JSON.stringify(ajustes);
+
+  const guardar = async () => {
+    const validacion = ajustesDespachoSchema.safeParse(ajustes);
+    if (!validacion.success) {
+      setError(validacion.error.issues[0]?.message ?? 'Revisa los valores');
+      return;
+    }
+    setGuardando(true);
+    setError(null);
+    try {
+      const datos = await api.patch<AjustesDespacho>('/v1/admin/dispatch', validacion.data);
+      setGuardados(datos);
+      setAjustes(datos);
+      push({
+        tone: 'positive',
+        title: 'Despacho actualizado',
+        description: 'Las próximas carreras se despachan con los nuevos valores, en toda la ciudad.',
+      });
+    } catch (causa) {
+      setError(causa instanceof ApiError ? causa.message : 'No se pudo guardar.');
+    } finally {
+      setGuardando(false);
+    }
+  };
+
+  return (
+    <Card className="space-y-3">
+      <CardHeader
+        title="Despacho por cercanía"
+        subtitle="Una sola regla para toda la ciudad. Cada ronda avisa a todos los taxis disponibles dentro de su rango, y se la lleva el primero que acepta. Si nadie la toma, se amplía el rango."
+      />
+
+      <div className="grid gap-2 sm:grid-cols-3">
+        {ajustes.rondas.map((r) => (
+          <div key={r.wave} className="space-y-2 rounded-md border border-line bg-surface-sunk px-2.5 py-2">
+            <p className="flex items-center gap-1 text-micro font-semibold uppercase tracking-[0.06em] text-ink-muted">
+              <Radar className="size-3" />
+              Ronda {r.wave}
+            </p>
+            <Field label="Rango (km)">
+              <Input
+                type="number"
+                step="0.1"
+                min="0.2"
+                disabled={!editable}
+                value={r.radiusKm}
+                onChange={(e) => ronda(r.wave, { radiusKm: Number(e.target.value) })}
+              />
+            </Field>
+            <Field label="Espera (segundos)">
+              <Input
+                type="number"
+                step="5"
+                min="15"
+                disabled={!editable}
+                value={r.timeoutSeconds}
+                onChange={(e) => ronda(r.wave, { timeoutSeconds: Number(e.target.value) })}
+              />
+            </Field>
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-2 rounded-md border border-line px-3 py-2.5">
+        <p className="text-base text-ink">Si no hay ningún taxi dentro del rango</p>
+        <p className="text-micro text-ink-muted">
+          Pasa en las veredas y de madrugada. Se avisa a los taxis más cercanos que haya, aunque estén
+          más lejos que la ronda 3, pero solo a los que estén a una distancia parecida a la del primero.
+          Si no contestan, en cada reintento se suman los siguientes. Si sí había taxis en el rango y
+          ninguno aceptó, no se avisa más lejos: la carrera se vuelve a ofrecer cerca. Con 0 taxis no
+          se avisa lejos.
+        </p>
+        <div className="grid gap-2 sm:grid-cols-3">
+          <Field label="Taxis más cercanos a avisar">
+            <Input
+              type="number"
+              min="0"
+              disabled={!editable}
+              value={ajustes.lejanos.candidatos}
+              onChange={(e) => lejanos({ candidatos: Number(e.target.value) })}
+            />
+          </Field>
+          <Field label="Hasta qué distancia (km)">
+            <Input
+              type="number"
+              step="1"
+              min="3"
+              disabled={!editable}
+              value={ajustes.lejanos.hastaKm}
+              onChange={(e) => lejanos({ hastaKm: Number(e.target.value) })}
+            />
+          </Field>
+          <Field label="Margen sobre el más cercano (km)">
+            <Input
+              type="number"
+              step="0.5"
+              min="0.2"
+              disabled={!editable}
+              value={ajustes.lejanos.margenKm}
+              onChange={(e) => lejanos({ margenKm: Number(e.target.value) })}
+            />
+          </Field>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line px-3 py-2.5">
+        <div className="min-w-0 flex-1">
+          <p className="text-base text-ink">Tope de seguridad de la ubicación</p>
+          <p className="text-micro text-ink-muted">
+            Un taxi que lleva más de estos minutos sin reportar su ubicación no recibe ofertas en ninguna
+            ronda: no se sabe dónde está. Vuelve a recibirlas apenas su aplicación reporte de nuevo.
+          </p>
+        </div>
+        <div className="w-36 shrink-0">
+          <Field label="Minutos">
+            <Input
+              type="number"
+              step="5"
+              min="2"
+              disabled={!editable}
+              value={ajustes.posicionMaximaMin}
+              onChange={(e) => setAjustes((a) => ({ ...a, posicionMaximaMin: Number(e.target.value) }))}
+            />
+          </Field>
+        </div>
+      </div>
+
+      {error ? <p className="text-caption text-[var(--t-critical-ink)]">{error}</p> : null}
+
+      {editable ? (
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-micro text-ink-muted">
+            Las rondas suman: quien no contestó sigue con la oferta en la siguiente. El cambio queda en
+            la bitácora de auditoría.
+          </p>
+          <Button
+            variant="primary"
+            icon={<Save className="size-3.5" />}
+            loading={guardando}
+            disabled={sinCambios}
+            onClick={() => void guardar()}
+          >
+            Guardar
+          </Button>
+        </div>
+      ) : null}
+    </Card>
   );
 }
 
@@ -134,13 +324,11 @@ function TarjetaZona({
   editable,
   open,
   onToggle,
-  onClose,
 }: {
   zone: Zone;
   editable: boolean;
   open: boolean;
   onToggle: () => void;
-  onClose: () => void;
 }) {
   const { push } = useToast();
   /*
@@ -150,9 +338,6 @@ function TarjetaZona({
   const enLaZona = useLive(
     (s) => s.drivers.filter((d) => d.status !== 'OFF_SHIFT' && d.position && zoneOf(d.position)?.id === zone.id).length,
   );
-  // Lo que se escribe vive aquí hasta guardar; un refresco de las zonas no lo pisa.
-  const [waves, setWaves] = useState<WaveConfig[]>(zone.waves);
-  const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [marcando, setMarcando] = useState(false);
   const [moviendo, setMoviendo] = useState(false);
@@ -176,41 +361,10 @@ function TarjetaZona({
     }
   };
 
-  const update = (wave: 1 | 2 | 3, patch: Partial<WaveConfig>) =>
-    setWaves((actuales) => actuales.map((w) => (w.wave === wave ? { ...w, ...patch } : w)));
-
   const abrirOCerrar = () => {
-    if (!open) setWaves(zone.waves);
     setError(null);
     onToggle();
   };
-
-  const guardar = async () => {
-    const validacion = cambiosZonaSchema.safeParse({ waves });
-    if (!validacion.success) {
-      setError(validacion.error.issues[0]?.message ?? 'Revisa los valores');
-      return;
-    }
-    setGuardando(true);
-    setError(null);
-    try {
-      // Antes este botón solo mostraba «guardado»: no había a dónde mandarlo.
-      await api.patch(`/v1/admin/zones/${zone.id}`, { waves });
-      await actions.refreshZones();
-      onClose();
-      push({
-        tone: 'positive',
-        title: 'Oleadas guardadas',
-        description: `${zone.name}: las próximas carreras se despachan con los nuevos valores.`,
-      });
-    } catch (causa) {
-      setError(causa instanceof ApiError ? causa.message : 'No se pudo guardar.');
-    } finally {
-      setGuardando(false);
-    }
-  };
-
-  const vistas = open ? waves : zone.waves;
 
   return (
     <Card className="space-y-3">
@@ -236,7 +390,7 @@ function TarjetaZona({
             ) : null}
             {editable ? (
               <Button size="sm" onClick={abrirOCerrar}>
-                {open ? 'Cerrar' : 'Editar'}
+                {open ? 'Cerrar' : 'Opciones'}
               </Button>
             ) : null}
           </>
@@ -244,21 +398,6 @@ function TarjetaZona({
       />
 
       <FormularioMoverZona zona={zone} open={moviendo} onClose={() => setMoviendo(false)} />
-
-      <div className="grid grid-cols-3 gap-2">
-        {vistas.map((wave) => (
-          <div key={wave.wave} className="rounded-md border border-line bg-surface-sunk px-2.5 py-2">
-            <p className="flex items-center gap-1 text-micro font-semibold uppercase tracking-[0.06em] text-ink-muted">
-              <Radar className="size-3" />
-              Oleada {wave.wave}
-            </p>
-            <p className="mt-1 tnum text-base text-ink">{wave.radiusKm} km</p>
-            <p className="tnum text-micro text-ink-muted">
-              {wave.candidates} candidatos · {wave.timeoutSeconds} s
-            </p>
-          </div>
-        ))}
-      </div>
 
       <AnimatePresence initial={false}>
         {open ? (
@@ -270,42 +409,13 @@ function TarjetaZona({
             className="overflow-hidden"
           >
             <div className="space-y-3 border-t border-line pt-3">
-              <SectionLabel>Parámetros por oleada</SectionLabel>
-              {waves.map((wave) => (
-                <div key={wave.wave} className="grid grid-cols-3 gap-2">
-                  <Field label={`Radio oleada ${wave.wave} (km)`}>
-                    <Input
-                      type="number"
-                      step="0.5"
-                      value={wave.radiusKm}
-                      onChange={(e) => update(wave.wave, { radiusKm: Number(e.target.value) })}
-                    />
-                  </Field>
-                  <Field label="Candidatos">
-                    <Input
-                      type="number"
-                      value={wave.candidates}
-                      onChange={(e) => update(wave.wave, { candidates: Number(e.target.value) })}
-                    />
-                  </Field>
-                  <Field label="Vencimiento (s)">
-                    <Input
-                      type="number"
-                      step="5"
-                      value={wave.timeoutSeconds}
-                      onChange={(e) => update(wave.wave, { timeoutSeconds: Number(e.target.value) })}
-                    />
-                  </Field>
-                </div>
-              ))}
-
               {error ? <p className="text-caption text-[var(--t-critical-ink)]">{error}</p> : null}
 
               <div className="flex items-center justify-between gap-3 rounded-md border border-line px-3 py-2.5">
                 <div className="min-w-0">
                   <p className="text-base text-ink">Punto de partida de las carreras sin ubicar</p>
                   <p className="text-micro text-ink-muted">
-                    Cuando no se encuentra la dirección ni hay ubicación, las oleadas arrancan desde el
+                    Cuando no se encuentra la dirección ni hay ubicación, las rondas arrancan desde el
                     centro de esta zona y el conductor llega leyendo la dirección. Solo una zona lo es.
                   </p>
                 </div>
@@ -323,20 +433,6 @@ function TarjetaZona({
                 )}
               </div>
 
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-micro text-ink-muted">
-                  Cada oleada busca más lejos que la anterior y suma candidatos nuevos: quien no contestó
-                  sigue con la oferta. El cambio queda en la bitácora de auditoría.
-                </p>
-                <Button
-                  variant="primary"
-                  icon={<Save className="size-3.5" />}
-                  loading={guardando}
-                  onClick={() => void guardar()}
-                >
-                  Guardar
-                </Button>
-              </div>
             </div>
           </motion.div>
         ) : null}

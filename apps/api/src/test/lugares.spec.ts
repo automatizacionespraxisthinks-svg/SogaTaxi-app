@@ -7,6 +7,8 @@ import {
   poligonoCircular,
   poligonosSeTocan,
   tieneNomenclatura,
+  zonaMasCercana,
+  zonasEncimadas,
 } from '@tax/shared';
 
 const LUGARES = [
@@ -136,5 +138,44 @@ describe('zonas circulares', () => {
     expect(poligonosSeTocan(centro, puntos(5.7803, -73.1, 1))).toBe(true);
     // Lago Sochagota, a 3,2 km: no se tocan.
     expect(poligonosSeTocan(centro, puntos(5.756, -73.13, 1.2))).toBe(false);
+  });
+
+  describe('zonas por barrio (26/11/2026)', () => {
+    const puntos = (lat: number, lng: number, r: number) =>
+      poligonoCircular(lat, lng, r).coordinates[0]!.map(([x, y]) => ({ lat: y, lng: x }));
+    // Dos barrios vecinos de Sogamoso, de 400 m, con los centros a 600 m: se pisan en el borde.
+    const centro = { id: 'centro', kind: 'urbano' as const, polygon: puntos(5.7148, -72.9279, 0.4) };
+    const laguito = { id: 'laguito', kind: 'urbano' as const, polygon: puntos(5.7202, -72.9279, 0.4) };
+    const zonas = [centro, laguito];
+
+    it('dos barrios vecinos se admiten; una zona encima de otra, no', () => {
+      expect(poligonosSeTocan(centro.polygon, laguito.polygon)).toBe(true);
+      expect(zonasEncimadas(centro.polygon, laguito.polygon)).toBe(false);
+      // Centro a 100 m del de «centro»: es la misma zona dos veces.
+      expect(zonasEncimadas(centro.polygon, puntos(5.7157, -72.9279, 0.4))).toBe(true);
+    });
+
+    it('en la franja que comparten dos barrios gana el del centro más cercano', () => {
+      expect(zonaMasCercana({ lat: 5.7172, lng: -72.9279 }, zonas)?.zona.id).toBe('centro');
+      expect(zonaMasCercana({ lat: 5.7178, lng: -72.9279 }, zonas)?.zona.id).toBe('laguito');
+    });
+
+    it('un punto fuera de todo barrio se anota en el más cercano, hasta 1 km de su borde', () => {
+      // 1 km al sur del Centro: fuera de los dos, a 600 m del borde del Centro.
+      const cerca = zonaMasCercana({ lat: 5.7058, lng: -72.9279 }, zonas);
+      expect(cerca?.zona.id).toBe('centro');
+      expect(cerca?.dentro).toBe(false);
+      expect(cerca?.aKm).toBeCloseTo(0.6, 1);
+      // 2 km al sur: un barrio ya no lo adopta (sus oleadas no llegarían).
+      expect(zonaMasCercana({ lat: 5.6968, lng: -72.9279 }, zonas)).toBeUndefined();
+    });
+
+    it('una vereda adopta más lejos que un barrio: hasta 3 km', () => {
+      const morca = { id: 'morca', kind: 'rural' as const, polygon: puntos(5.721, -72.8909, 1) };
+      // 3 km al oriente de Morcá: a 2 km de su borde.
+      expect(zonaMasCercana({ lat: 5.721, lng: -72.8638 }, [...zonas, morca])?.zona.id).toBe('morca');
+      // 5 km al oriente: campo sin zona, oleadas anchas.
+      expect(zonaMasCercana({ lat: 5.721, lng: -72.8457 }, [...zonas, morca])).toBeUndefined();
+    });
   });
 });

@@ -1,3 +1,4 @@
+import { RONDAS_DE_DESPACHO } from './ride';
 import { z } from 'zod';
 import { pointSchema } from './geo';
 
@@ -230,28 +231,60 @@ export type NuevaZona = z.infer<typeof nuevaZonaSchema>;
 
 const oleadaSchema = z.object({
   wave: z.union([z.literal(1), z.literal(2), z.literal(3)]),
-  radiusKm: z.number().min(0.5).max(40),
-  candidates: z.number().int().min(1).max(30),
-  timeoutSeconds: z.number().int().min(15).max(300),
+  // Desde 200 m: en el centro, la primera ronda puede ser de un par de cuadras.
+  radiusKm: z.number().min(0.2, 'El rango mínimo es 0,2 km').max(40, 'El rango máximo es 40 km'),
+  // Tope de seguridad por ronda; 200 (`TODOS_EN_EL_RANGO`) es «todos los del rango».
+  candidates: z.number().int().min(1).max(500),
+  timeoutSeconds: z.number().int().min(15, 'La espera mínima es 15 s').max(300, 'La espera máxima es 300 s'),
 });
+
+/**
+ * Los ajustes del despacho, una sola regla para toda la ciudad (26/11/2026).
+ * Se guardan en la base y se cambian desde el panel, en *Zonas*; no dependen
+ * de la zona ni de variables de entorno.
+ *
+ *  - `rondas`: las tres rondas por cercanía. Cada una avisa a todos los taxis
+ *    disponibles dentro de su rango; si nadie acepta, se pasa a la siguiente.
+ *  - `lejanos`: qué hacer cuando en las tres rondas no hubo NINGÚN taxi a
+ *    quien avisar (una vereda, la madrugada): avisar a los más cercanos que
+ *    haya, hasta `hastaKm`. No a cualquiera de los `candidatos` más cercanos:
+ *    solo a los que estén a una distancia parecida a la del primero, hasta
+ *    `margenKm` más lejos que él, para que no compita uno a 3 km con uno a
+ *    12. En cada reintento el margen y el cupo crecen, y así entran los
+ *    siguientes. Con 0 candidatos no se avisa lejos.
+ *  - `posicionMaximaMin`: tope de seguridad. Un taxi que lleva más de estos
+ *    minutos sin reportar su posición no recibe la oferta en ninguna ronda:
+ *    no se sabe dónde está.
+ */
+export const ajustesDespachoSchema = z.object({
+  rondas: z
+    .array(oleadaSchema)
+    .length(3)
+    .refine((w) => [1, 2, 3].every((n) => w.some((o) => o.wave === n)), 'Faltan rondas')
+    .refine((w) => {
+      const orden = [...w].sort((a, b) => a.wave - b.wave);
+      return orden[0]!.radiusKm <= orden[1]!.radiusKm && orden[1]!.radiusKm <= orden[2]!.radiusKm;
+    }, 'Cada ronda busca más lejos que la anterior'),
+  lejanos: z.object({
+    candidatos: z.number().int().min(0, 'No puede ser negativo').max(20, 'Máximo 20 taxis'),
+    hastaKm: z.number().min(3, 'Mínimo 3 km').max(100, 'Máximo 100 km'),
+    margenKm: z.number().min(0.2, 'El margen mínimo es 0,2 km').max(20, 'El margen máximo es 20 km'),
+  }),
+  posicionMaximaMin: z.number().int().min(2, 'Mínimo 2 minutos').max(240, 'Máximo 240 minutos'),
+});
+export type AjustesDespacho = z.infer<typeof ajustesDespachoSchema>;
+
+export const AJUSTES_DESPACHO_DE_FABRICA: AjustesDespacho = {
+  rondas: RONDAS_DE_DESPACHO,
+  lejanos: { candidatos: 3, hastaKm: 40, margenKm: 1 },
+  posicionMaximaMin: 30,
+};
 
 export const cambiosZonaSchema = z
   .object({
     tortuosity: z.number().min(1).max(3).optional(),
     /** Hacerla el punto de partida de las carreras sin ubicar. Solo se pone: quitarla es elegir otra. */
     esReferencia: z.literal(true).optional(),
-    waves: z
-      .array(oleadaSchema)
-      .length(3)
-      .refine((w) => [1, 2, 3].every((n) => w.some((o) => o.wave === n)), 'Faltan oleadas')
-      .refine(
-        (w) => {
-          const orden = [...w].sort((a, b) => a.wave - b.wave);
-          return orden[0]!.radiusKm <= orden[1]!.radiusKm && orden[1]!.radiusKm <= orden[2]!.radiusKm;
-        },
-        'Cada oleada busca más lejos que la anterior',
-      )
-      .optional(),
     /*
      * Mover la zona o cambiarle el tamaño.
      *
@@ -273,7 +306,6 @@ export const cambiosZonaSchema = z
   .refine(
     (v) =>
       v.tortuosity !== undefined ||
-      v.waves !== undefined ||
       v.esReferencia !== undefined ||
       v.center !== undefined,
     'No hay nada que cambiar',

@@ -5,7 +5,7 @@ import { CENTRO } from './coordenadas';
  * El recorrido de las oleadas, tal como se ve desde el panel.
  *
  * El caso es el de las pruebas con un solo teléfono: un conductor en turno,
- * pero lejos, fuera de los 12 km de la tercera oleada. Las tres oleadas por
+ * pero lejos, fuera de los 3 km de la tercera oleada. Las tres oleadas por
  * radio no lo encuentran nunca, así que sin la ronda final no habría forma
  * de ver un aviso llegando de verdad.
  *
@@ -14,19 +14,15 @@ import { CENTRO } from './coordenadas';
  *  - que cada oleada quede registrada, también las que no hallaron a nadie
  *    —antes no dejaban rastro y el panel no podía contarlas—;
  *  - que las vacías pasen al instante, sin esperar el reloj;
- *  - que la ronda final llegue al conductor lejano y él pueda aceptarla;
- *  - que con `OLEADA_FINAL_A_TODOS=false` la carrera acabe sin asignar,
- *    como antes, para poder apagar esto cuando dejen de hacer falta pruebas.
+ *  - que, no habiendo nadie en 3 km, la cuarta ronda avise al más cercano
+ *    que haya y él pueda aceptarla (26/11/2026). La ronda «a todos» de
+ *    prueba ya no existe.
  *
  *   pnpm --filter @tax/api exec tsx src/test/e2e-oleadas.ts <clave-de-api>
- *
- * El último punto depende de cómo se arrancó la API, así que la prueba lee
- * el mismo interruptor y comprueba el comportamiento que toca.
  */
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
-const A_TODOS = (process.env.OLEADA_FINAL_A_TODOS ?? 'true') === 'true';
 
 const CONDUCTOR = { code: '101', plate: 'UBP472' };
 const APARTADOS = [
@@ -35,7 +31,7 @@ const APARTADOS = [
 ];
 const PIN = '4821';
 
-/** Unos 19 km al norte: fuera de los 12 km de la tercera oleada urbana. */
+/** Unos 19 km al norte: fuera de los 3 km de la tercera oleada urbana. */
 const LEJOS = { lat: 5.95, lng: -72.9279 };
 
 interface WaveLogEntry {
@@ -45,6 +41,7 @@ interface WaveLogEntry {
   radiusKm: number | null;
   candidates: number;
   sinGps?: number;
+  masCercanos?: boolean;
 }
 
 interface Json { [k: string]: unknown }
@@ -106,7 +103,6 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  console.log(`\n  (ronda final a todos: ${A_TODOS ? 'encendida' : 'apagada'})`);
 
   console.log('\n0. Un solo conductor en turno, lejos del punto');
   const activas = await call('/v1/rides?status=ASSIGNED,DRIVER_ARRIVED,IN_PROGRESS,NOTIFIED,PENDING', { apiKey: true });
@@ -132,7 +128,8 @@ async function main(): Promise<void> {
   assert(creada.status < 400, 'carrera creada', creada.body);
   const rideId = (creada.body as { id: string }).id;
 
-  const esperadas = A_TODOS ? 4 : 3;
+  // La cuarta ronda sale porque en 3 km no había a quién avisar.
+  const esperadas = 4;
   const d = await esperarOleadas(rideId, esperadas);
 
   console.log('\n2. Las tres oleadas por radio quedan registradas, aunque no hallen a nadie');
@@ -143,27 +140,20 @@ async function main(): Promise<void> {
     assert(e!.expiresAt === null, '  y paso al instante, sin esperar el reloj');
   }
 
-  if (A_TODOS) {
-    console.log('\n3. La ronda final llega al conductor lejano');
+  {
+    console.log('\n3. Sin nadie en 3 km, se avisa al mas cercano que haya (26/11/2026)');
     const final = d.waveLog.find((x) => x.wave === 4);
-    assert(Boolean(final), 'la ronda a todos quedo en el registro');
-    assert(final!.radiusKm === null, '  sin limite de distancia');
-    assert(final!.candidates === 1, `  con ${final!.candidates} conductor`);
-    assert(final!.expiresAt !== null, '  y con su reloj corriendo');
+    assert(Boolean(final), 'la cuarta ronda quedo en el registro');
+    assert(final!.masCercanos === true, '  marcada como «los mas cercanos», no «a todos»');
+    assert(final!.candidates === 1, `  con ${final!.candidates} conductor: el que esta a 19 km`);
 
     const oferta = d.offers.find((o) => o.wave === 4);
-    assert(oferta?.response === 'pending', 'el conductor tiene la oferta pendiente');
-    assert(d.status === 'NOTIFIED', 'la carrera esta notificada');
+    assert(oferta?.response === 'pending', 'el conductor lejano tiene la oferta pendiente');
 
     const aceptar = await call(`/v1/driver/rides/${rideId}/accept`, { method: 'POST', token });
     assert(aceptar.status < 400, 'y puede aceptarla', aceptar.body);
-
     const tras = (await call(`/v1/rides/${rideId}`, { apiKey: true })).body as { status: string };
     assert(tras.status === 'ASSIGNED', 'la carrera queda asignada');
-  } else {
-    console.log('\n3. Sin ronda final: la carrera queda sin asignar, como antes');
-    assert(!d.waveLog.some((x) => x.wave === 4), 'no hubo ronda a todos');
-    assert(d.status === 'UNASSIGNED', 'y la carrera quedo sin asignar');
   }
 
   console.log('\n4. Limpieza');

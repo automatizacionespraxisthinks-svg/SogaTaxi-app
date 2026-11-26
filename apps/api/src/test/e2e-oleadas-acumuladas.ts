@@ -18,20 +18,19 @@ import * as schema from '../db/schema';
  *     con el plazo alargado, y puede aceptarla en la tercera.
  *  3. Si todos los que la tienen la rechazan, se pasa a la siguiente en el
  *     acto, y el temporizador de la oleada anterior no la vuelve a lanzar.
- *  4. La ronda final mantiene a todos los de antes, y al agotarse las
- *     ofertas vencen todas juntas.
+ *  4. Si hubo a quién avisar y nadie aceptó, no se avisa más lejos: no hay
+ *     cuarta ronda, y al agotarse las ofertas vencen todas juntas.
  *
  *  5. Lo que no se ubica sale del punto de partida que elige la oficina.
  *
- * Pone oleadas de 15 segundos en la zona Centro mientras corre y las deja
- * como estaban al terminar. Tarda un par de minutos.
+ * Pone rondas de 15 segundos en los ajustes del despacho mientras corre y
+ * los deja como estaban al terminar. Tarda un par de minutos.
  *
  *   pnpm --filter @tax/api exec tsx src/test/e2e-oleadas-acumuladas.ts <clave-de-api>
  */
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';
 const API_KEY = process.argv[2] ?? process.env.TAX_API_KEY;
-const A_TODOS = (process.env.OLEADA_FINAL_A_TODOS ?? 'true') === 'true';
 const PIN = '4821';
 const CONDUCTORES = [
   { code: '101', plate: 'UBP472' },
@@ -93,7 +92,7 @@ async function main(): Promise<void> {
 
   const [centro] = await db.select().from(schema.zones).where(eq(schema.zones.name, 'Centro')).limit(1);
   if (!centro) throw new Error('No está la zona Centro de la siembra');
-  const olasOriginales = centro.waves;
+  let ajustesOriginales: unknown;
   const creadas: string[] = [];
   const tokens: string[] = [];
 
@@ -168,18 +167,21 @@ async function main(): Promise<void> {
 
     /* -------------------------------------------------------------- 1 */
     console.log('\n1. Con el GPS viejo también recibe la carrera');
-    const cambio = await call(`/v1/admin/zones/${centro.id}`, {
+    ajustesOriginales = (await call('/v1/admin/dispatch', { oficina: true })).body;
+    const cambio = await call('/v1/admin/dispatch', {
       method: 'PATCH',
       oficina: true,
       body: {
-        waves: [
+        rondas: [
           { wave: 1, radiusKm: 1, candidates: 5, timeoutSeconds: 15 },
           { wave: 2, radiusKm: 2, candidates: 5, timeoutSeconds: 15 },
           { wave: 3, radiusKm: 3, candidates: 5, timeoutSeconds: 15 },
         ],
+        lejanos: { candidatos: 3, hastaKm: 40, margenKm: 1 },
+        posicionMaximaMin: 30,
       },
     });
-    assert(cambio.status < 400, 'oleadas de 15 s en el Centro', cambio.body);
+    assert(cambio.status < 400, 'rondas de 15 s para toda la ciudad', cambio.body);
 
     // Dos con la última posición de hace cinco minutos: el teléfono bloqueado.
     const haceCinco = String(Date.now() - 5 * 60_000);
@@ -202,15 +204,17 @@ async function main(): Promise<void> {
     /* -------------------------------------------------------------- 2 */
     console.log('\n2. Quien no contestó sigue con la oferta en las oleadas siguientes');
     // Uno nuevo por oleada, para ver cómo se suman.
-    await call(`/v1/admin/zones/${centro.id}`, {
+    await call('/v1/admin/dispatch', {
       method: 'PATCH',
       oficina: true,
       body: {
-        waves: [
+        rondas: [
           { wave: 1, radiusKm: 1, candidates: 1, timeoutSeconds: 15 },
           { wave: 2, radiusKm: 2, candidates: 1, timeoutSeconds: 15 },
           { wave: 3, radiusKm: 3, candidates: 1, timeoutSeconds: 15 },
         ],
+        lejanos: { candidatos: 3, hastaKm: 40, margenKm: 1 },
+        posicionMaximaMin: 30,
       },
     });
     const dos = await call('/v1/rides', {
@@ -272,25 +276,18 @@ async function main(): Promise<void> {
     assert(unaVez.waveLog.filter((e) => e.wave === 2).length === 1, 'la oleada 2 está una sola vez', unaVez.waveLog);
 
     /* -------------------------------------------------------------- 4 */
-    if (A_TODOS) {
-      console.log('\n4. La ronda final mantiene a todos, y al final vencen juntas');
-      const final = await esperarOleada(r3, 4, 40);
-      const ola4 = final.waveLog.find((e) => e.wave === 4);
-      assert(Boolean(ola4), 'hubo ronda final', final.waveLog);
-      assert(ola4!.candidates === 0 && ola4!.arrastrados === 2, '  sin nuevos y con los dos que seguían', ola4);
-      assert(ola4!.expiresAt !== null, '  y con su reloj: esperar sirve, hay a quién');
-
-      let fin = await registro(r3);
-      for (let i = 0; i < 80 && fin.status === 'NOTIFIED'; i++) {
-        await dormir(250);
-        fin = await registro(r3);
-      }
-      assert(fin.status === 'UNASSIGNED', 'agotada la ronda final, queda sin asignar', fin.status);
-      const o3 = await ofertas(r3);
-      assert(o3.filter((o) => o.response === 'expired').length === 2, '  y las dos que seguían vencen juntas', o3);
-      assert(o3.filter((o) => o.response === 'rejected').length === 1, '  la rechazada sigue rechazada');
-      assert(!o3.some((o) => o.response === 'pending'), '  sin ninguna pendiente');
+    console.log('\n4. Hubo a quién avisar y nadie aceptó: no se avisa más lejos');
+    let fin = await registro(r3);
+    for (let i = 0; i < 200 && fin.status === 'NOTIFIED'; i++) {
+      await dormir(250);
+      fin = await registro(r3);
     }
+    assert(fin.status === 'UNASSIGNED', 'agotadas las tres rondas, queda sin asignar', fin.status);
+    assert(!fin.waveLog.some((e) => e.wave === 4), '  sin cuarta ronda: los más lejanos no se enteran', fin.waveLog);
+    const o3 = await ofertas(r3);
+    assert(o3.filter((o) => o.response === 'expired').length === 2, '  y las dos que seguían vencen juntas', o3);
+    assert(o3.filter((o) => o.response === 'rejected').length === 1, '  la rechazada sigue rechazada');
+    assert(!o3.some((o) => o.response === 'pending'), '  sin ninguna pendiente');
 
     /* -------------------------------------------------------------- 5 */
     console.log('\n5. Lo que no se ubica sale del punto de partida que elige la oficina');
@@ -324,11 +321,12 @@ async function main(): Promise<void> {
     for (const id of creadas) {
       await call(`/v1/rides/${id}/cancel`, { method: 'POST', apiKey: true, body: { reason: 'Fin de la prueba' } });
     }
-    await call(`/v1/admin/zones/${centro.id}`, {
-      method: 'PATCH',
-      oficina: true,
-      body: { waves: olasOriginales, ...(centro.esReferencia ? { esReferencia: true } : {}) },
-    });
+    if (ajustesOriginales) {
+      await call('/v1/admin/dispatch', { method: 'PATCH', oficina: true, body: ajustesOriginales });
+    }
+    if (centro.esReferencia) {
+      await call(`/v1/admin/zones/${centro.id}`, { method: 'PATCH', oficina: true, body: { esReferencia: true } });
+    }
     for (const token of tokens) await call('/v1/driver/shift/close', { method: 'POST', token });
     await db.delete(schema.sessions).where(eq(schema.sessions.userId, OFICINA_ID));
     await db.delete(schema.users).where(and(eq(schema.users.id, OFICINA_ID)));

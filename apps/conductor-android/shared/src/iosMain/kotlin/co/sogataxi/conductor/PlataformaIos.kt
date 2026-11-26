@@ -44,7 +44,10 @@ import platform.UserNotifications.UNNotificationSound
 import platform.UserNotifications.UNUserNotificationCenter
 import platform.UserNotifications.UNUserNotificationCenterDelegateProtocol
 import platform.darwin.NSObject
+import platform.darwin.DISPATCH_TIME_NOW
+import platform.darwin.dispatch_after
 import platform.darwin.dispatch_async
+import platform.darwin.dispatch_time
 import platform.darwin.dispatch_get_main_queue
 import platform.posix.memcpy
 import kotlin.coroutines.resume
@@ -204,7 +207,7 @@ class PlataformaIos(
     private var reproductor: AVAudioPlayer? = null
 
     /**
-     * En bucle hasta que conteste o venza, aunque el iPhone esté en silencio.
+     * Dos segundos, aunque el iPhone esté en silencio.
      * Solo con la app en pantalla: detrás o con el teléfono bloqueado, iOS no
      * deja arrancar audio, y ahí lo que suena es la notificación (28 s). Así
      * tampoco suenan las dos a la vez.
@@ -221,9 +224,13 @@ class PlataformaIos(
         sesion.setCategory(AVAudioSessionCategoryPlayback, error = null)
         sesion.setActive(true, error = null)
         val nuevo = AVAudioPlayer(contentsOfURL = archivo, error = null)
-        nuevo.numberOfLoops = -1
+        nuevo.numberOfLoops = 0
         if (nuevo.play()) {
             reproductor = nuevo
+            // Dos segundos y se calla (26/11/2026): con tantas carreras, en bucle cansaba.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2_000_000_000L), dispatch_get_main_queue()) {
+                if (reproductor === nuevo) callarAlarma()
+            }
         } else {
             Diagnostico.evento("No pudo sonar la alarma: iOS no dejó reproducir")
             soltarAudio()

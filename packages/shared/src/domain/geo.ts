@@ -117,6 +117,62 @@ export function poligonosSeTocan(a: Point[], b: Point[]): boolean {
   return a.some((p) => pointInPolygon(p, b)) || b.some((p) => pointInPolygon(p, a));
 }
 
+/**
+ * Si una zona queda puesta encima de otra: el centro de una cae dentro de la
+ * otra.
+ *
+ * Desde el 26/11/2026 las zonas pueden ser barrios, y los barrios son
+ * vecinos: dos círculos contiguos se pisan en el borde. Eso se admite —el
+ * punto se clasifica en la zona cuyo centro le queda más cerca— y lo que se
+ * sigue rechazando es una zona encima de otra, que sería la misma dos veces.
+ */
+export function zonasEncimadas(a: Point[], b: Point[]): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  return pointInPolygon(centroYRadioDe(a).center, b) || pointInPolygon(centroYRadioDe(b).center, a);
+}
+
+/**
+ * Hasta dónde una zona «adopta» un punto que no cae dentro de ninguna
+ * (26/11/2026). Con las zonas por barrio quedan calles entre un barrio y el
+ * siguiente, y las afueras: ese servicio se atiende igual y se anota en el
+ * barrio o la vereda más cercana, con sus oleadas. Más lejos que esto ya no
+ * es «al lado de»: es campo sin zona, y se despacha con las oleadas anchas.
+ *
+ * Un barrio adopta menos que una vereda, y no es capricho: sus oleadas son
+ * cortas (3 km como mucho). Si un barrio adoptara un punto a 3 km de su
+ * borde, ese servicio se buscaría con oleadas de ciudad donde ya no hay
+ * taxis cerca, y no le llegaría a nadie.
+ */
+export const ZONA_CERCANA_MAX_KM = { urbano: 1, rural: 3 } as const;
+
+/**
+ * La zona de un punto: la que lo contiene (si dos vecinas se pisan, la del
+ * centro más cercano) o, si no cae en ninguna, la más cercana midiendo hasta
+ * su borde, si está al alcance de esa zona (`ZONA_CERCANA_MAX_KM`). Es la misma regla de `ZonesService.masCercana`
+ * en la API; aquí vive para que el panel diga lo mismo antes de guardar.
+ */
+export function zonaMasCercana<T extends { polygon: Point[]; kind: string }>(
+  point: Point,
+  zonas: T[],
+): { zona: T; dentro: boolean; aKm: number } | undefined {
+  let mejor: { zona: T; dentro: boolean; aKm: number; alCentro: number } | undefined;
+  for (const zona of zonas) {
+    if (zona.polygon.length === 0) continue;
+    const { center, radiusKm } = centroYRadioDe(zona.polygon);
+    const alCentro = haversineKm(point, center);
+    const dentro = pointInPolygon(point, zona.polygon);
+    const aKm = dentro ? 0 : Math.max(0, alCentro - radiusKm);
+    if (aKm > ZONA_CERCANA_MAX_KM[zona.kind === 'rural' ? 'rural' : 'urbano']) continue;
+    const gana =
+      !mejor ||
+      (dentro && !mejor.dentro) ||
+      (dentro === mejor.dentro && (dentro ? alCentro < mejor.alCentro : aKm < mejor.aKm));
+    if (gana) mejor = { zona, dentro, aKm, alCentro };
+  }
+  if (!mejor) return undefined;
+  return { zona: mejor.zona, dentro: mejor.dentro, aKm: Math.round(mejor.aKm * 100) / 100 };
+}
+
 /** Punto en polígono (ray casting), equivalente al booleanPointInPolygon de Turf. */
 export function pointInPolygon(point: Point, polygon: Point[]): boolean {
   let inside = false;

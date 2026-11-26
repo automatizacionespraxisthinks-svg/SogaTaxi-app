@@ -1,5 +1,6 @@
 export * from './domain/ride';
 export * from './domain/driver';
+export * from './domain/avisos-flota';
 export * from './domain/password';
 export * from './domain/account';
 export * from './domain/geo';

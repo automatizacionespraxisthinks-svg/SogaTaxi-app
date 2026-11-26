@@ -37,8 +37,10 @@ export class TrayectosService {
   constructor(private readonly zonesService: ZonesService) {}
 
   medir(origin: Point, destination?: Point): Trayecto {
-    const originZone = this.zonesService.classify(origin);
-    const destinationZone = destination ? this.zonesService.classify(destination) : undefined;
+    // La que lo contiene o la más cercana: un servicio entre dos barrios, o
+    // en las afueras, se atiende con las oleadas del barrio de al lado.
+    const originZone = this.zonesService.masCercana(origin)?.zona;
+    const destinationZone = destination ? this.zonesService.masCercana(destination)?.zona : undefined;
     const tortuosidad = originZone?.tortuosity ?? TORTUOSIDAD_SIN_ZONA;
 
     // La distancia real siempre es mayor que la recta; el factor de

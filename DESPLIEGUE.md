@@ -228,9 +228,6 @@ VAPID_SUBJECT=mailto:soporte@TUDOMINIO
 
 GOOGLE_GEOCODING_API_KEY=...
 
-# Solo mientras se prueba: ver la nota de abajo.
-OLEADA_FINAL_A_TODOS=true
-
 # Monitor de las líneas de WhatsApp: ver la nota de abajo.
 WAHA_URL=http://NOMBRE-DEL-SERVICIO-WAHA:3000
 WAHA_API_KEY=...
@@ -278,12 +275,21 @@ Tres cosas que se equivocan siempre:
 - **`PUBLIC_ORIGINS`** sin barra final y con `https://`. Si no coincide
   exactamente con lo que el navegador manda, el panel recibe un error de CORS
   y no carga.
-- **`OLEADA_FINAL_A_TODOS`** añade, tras la tercera oleada, una ronda que
-  avisa a **todos** los conductores disponibles sin mirar distancia, tipo de
-  vehículo ni antigüedad del GPS, y mantiene la oferta a los de las tres
-  oleadas que no contestaron. La empresa la quiere siempre (3/11/2026), así
-  que viene encendida; `false` la apaga y la carrera queda sin asignar al
-  vencer la tercera. Un conductor en pausa no la recibe, y quien rechazó la
+- **`OLEADA_FINAL_A_TODOS` ya no existe** (26/11/2026). Era una ronda de prueba
+  que avisaba a toda la flota y hacía cruzar la ciudad. Si sigue puesta en el
+  entorno, la API la ignora; se puede borrar.
+- **Despacho por cercanía** (26/11/2026). No depende de la zona ni de
+  variables de entorno: se ajusta en el panel, en *Zonas → Despacho por
+  cercanía*, y se guarda en la tabla `dispatch_settings` (la crea la
+  migración 0029; vacía, valen los valores de fábrica). Tres rondas avisan a
+  **todos** los taxis disponibles a 1 km, luego hasta 2 km y luego hasta 3 km,
+  y se la lleva el primero que acepta. Si en las tres no hubo ningún taxi a
+  quien avisar —una vereda, la madrugada—, se avisa a los más cercanos que
+  haya (hasta 3, a una distancia parecida a la del primero, y en cada
+  reintento se suman los siguientes), hasta 40 km; si sí hubo y nadie aceptó,
+  la carrera se relanza cerca. Un taxi que lleva más de 30 minutos sin
+  reportar su ubicación no recibe ofertas.
+  Los barrios y las veredas solo sirven para las estadísticas. Un conductor en pausa no la recibe, y quien rechazó la
   carrera tampoco.
 - **`GOOGLE_GEOCODING_API_KEY`** convierte las direcciones que el cliente
   escribe por WhatsApp en coordenadas. Necesita la API de Geocoding

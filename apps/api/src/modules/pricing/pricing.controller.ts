@@ -2,10 +2,12 @@ import { Body, Controller, Get, Inject, Param, ParseUUIDPipe, Patch, Post, Req, 
 import type { FastifyRequest } from 'fastify';
 import { desc, eq } from 'drizzle-orm';
 import {
+  ajustesDespachoSchema,
   cambiosLugarSchema,
   cambiosZonaSchema,
   nuevaZonaSchema,
   nuevoLugarSchema,
+  type AjustesDespacho,
   type CambiosLugar,
   type CambiosZona,
   type NuevaZona,
@@ -110,6 +112,25 @@ export class AdminPricingController {
       polygon: zone.polygon,
       esReferencia: zone.esReferencia,
     }));
+  }
+
+  /** Los ajustes del despacho de toda la ciudad, para la tarjeta del panel. */
+  @Get('dispatch')
+  dispatchSettings() {
+    return this.zonesService.ajustesDespacho();
+  }
+
+  /**
+   * Cambiarlos cambia a quién se le avisa cada carrera: es de quien gestiona
+   * zonas, como antes lo eran las oleadas de cada zona.
+   */
+  @Patch('dispatch')
+  @RequierePermiso('zonas.gestionar')
+  updateDispatchSettings(
+    @Req() request: FastifyRequest,
+    @Body(zodBody(ajustesDespachoSchema)) body: AjustesDespacho,
+  ) {
+    return this.catalogo.cambiarAjustesDespacho(body, actorDe(request));
   }
 
   /** Catálogo de lugares, ordenado por uso: los más resueltos arriba. */

@@ -53,8 +53,11 @@ export function prepararSonido(): () => void {
   return () => window.removeEventListener('pointerdown', alTocar);
 }
 
-/** Vueltas del sonido por oferta: unos 7 s, sin volverse insoportable. */
-const VUELTAS = 3;
+/**
+ * Cuánto suena cada oferta (26/11/2026): dos segundos y se calla. Antes daba
+ * tres vueltas (unos 7 s) y, con tantas carreras llegando, cansaba.
+ */
+const SEGUNDOS_DE_SONIDO = 2;
 
 /**
  * Suena la oferta y devuelve con qué callarla (al aceptar, rechazar o
@@ -70,11 +73,15 @@ export function sonarOferta(): () => void {
   }
   const fuente = ctx.createBufferSource();
   fuente.buffer = sonido;
-  fuente.loop = true;
-  fuente.connect(ctx.destination);
+  // Baja el volumen en el último cuarto de segundo: cortado en seco suena a falla.
+  const volumen = ctx.createGain();
+  fuente.connect(volumen).connect(ctx.destination);
   const inicio = ctx.currentTime + 0.02;
+  const fin = inicio + Math.min(SEGUNDOS_DE_SONIDO, sonido.duration);
+  volumen.gain.setValueAtTime(1, Math.max(inicio, fin - 0.25));
+  volumen.gain.linearRampToValueAtTime(0.0001, fin);
   fuente.start(inicio);
-  fuente.stop(inicio + sonido.duration * VUELTAS);
+  fuente.stop(fin);
   return () => {
     try {
       fuente.stop();

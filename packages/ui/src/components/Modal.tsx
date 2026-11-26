@@ -71,7 +71,14 @@ export function Modal({ open, onClose, title, subtitle, footer, width = 'md', ch
                 <h2 className="truncate text-title font-semibold text-ink">{title}</h2>
                 {subtitle ? <div className="mt-1 text-caption text-ink-muted">{subtitle}</div> : null}
               </div>
-              <IconButton label="Cerrar" variant="ghost" onClick={onClose} icon={<X className="size-4" />} />
+              <IconButton
+                label="Cerrar"
+                variant="secondary"
+                size="lg"
+                className="shrink-0"
+                onClick={onClose}
+                icon={<X className="size-5" />}
+              />
             </header>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>

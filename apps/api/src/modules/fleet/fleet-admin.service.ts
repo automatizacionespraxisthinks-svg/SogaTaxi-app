@@ -2,10 +2,17 @@ import { randomInt } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
-import type { VehicleType } from '@tax/shared';
-import { ACTIVE_RIDE_STATUSES, finDeSuspension, sigueSuspendido } from '@tax/shared';
+import type { CampoExtra, VehicleType } from '@tax/shared';
+import {
+  ACTIVE_RIDE_STATUSES,
+  MAX_CAMPOS_EXTRA,
+  finDeSuspension,
+  sigueSuspendido,
+  valorDeCampoExtraValido,
+} from '@tax/shared';
 import { DB, type Database } from '../../db/db.module';
 import {
+  camposExtra,
   driverDevices,
   driverPositions,
   drivers,
@@ -17,7 +24,8 @@ import {
 } from '../../db/schema';
 import { AppError } from '../../common/problem';
 import { isUniqueViolation } from '../../common/pg-errors';
-import { hashSecret } from '../../common/crypto';
+import { documentHash, encryptColumn, hashSecret } from '../../common/crypto';
+import { loadEnv } from '../../config/env';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { AuditService } from '../audit/audit.service';
 import { FleetService } from './fleet.service';
@@ -70,10 +78,35 @@ export interface NuevoVehiculo {
 }
 
 export interface CambiosVehiculo {
+  /** Corregir la placa: se digitó mal, o el carro cambió de placa. */
+  plate?: string;
   internalNumber?: string | null;
   type?: VehicleType;
   capacity?: number;
   active?: boolean;
+  brand?: string | null;
+  modelYear?: number | null;
+  ownerName?: string | null;
+  /** `AAAA-MM-DD`, o nulo para borrarla. */
+  soatExpiresOn?: string | null;
+  rtoExpiresOn?: string | null;
+  /** Campos adicionales, por id del campo; vacío borra el valor. */
+  extra?: Record<string, string>;
+}
+
+export interface CambiosConductor {
+  name?: string;
+  phone?: string | null;
+  active?: boolean;
+  esPrueba?: boolean;
+  aceptaPagoElectronico?: boolean;
+  /** La cédula, solo dígitos. No se puede dejar vacía una vez puesta. */
+  cedula?: string;
+  /** `AAAA-MM-DD`, o nulo para borrarla. */
+  licenseExpiresOn?: string | null;
+  licenseRestriction?: string | null;
+  /** Campos adicionales, por id del campo; vacío borra el valor. */
+  extra?: Record<string, string>;
 }
 
 const capacidadPorTipo = (tipo: VehicleType) => (tipo === 'van' ? 8 : tipo === 'camioneta' ? 5 : 4);
@@ -177,18 +210,13 @@ export class FleetAdminService {
 
   /* ------------------------------------------------------------ cambios */
 
-  /** Cambia nombre, teléfono, si sigue trabajando o si es una cuenta de prueba. */
-  async updateDriver(
-    driverId: string,
-    cambios: {
-      name?: string;
-      phone?: string | null;
-      active?: boolean;
-      esPrueba?: boolean;
-      aceptaPagoElectronico?: boolean;
-    },
-    actor: AdminActor,
-  ): Promise<void> {
+  /**
+   * Cambia los datos de un conductor: nombre, teléfono, cédula, licencia,
+   * campos adicionales, si sigue trabajando o si es una cuenta de prueba.
+   *
+   * La cédula se guarda cifrada y en la bitácora no queda: solo que se cambió.
+   */
+  async updateDriver(driverId: string, cambios: CambiosConductor, actor: AdminActor): Promise<void> {
     await this.exigirVigente(driverId);
     const [antes] = await this.db
       .select({
@@ -198,6 +226,9 @@ export class FleetAdminService {
         active: drivers.active,
         esPrueba: drivers.esPrueba,
         aceptaPagoElectronico: drivers.aceptaPagoElectronico,
+        licenseExpiresOn: drivers.licenseExpiresOn,
+        licenseRestriction: drivers.licenseRestriction,
+        extra: drivers.extra,
       })
       .from(drivers)
       .where(eq(drivers.id, driverId))
@@ -211,7 +242,17 @@ export class FleetAdminService {
       active: cambios.active ?? antes.active,
       esPrueba: cambios.esPrueba ?? antes.esPrueba,
       aceptaPagoElectronico: cambios.aceptaPagoElectronico ?? antes.aceptaPagoElectronico,
+      licenseExpiresOn: cambios.licenseExpiresOn === undefined ? antes.licenseExpiresOn : cambios.licenseExpiresOn,
+      licenseRestriction:
+        cambios.licenseRestriction === undefined ? antes.licenseRestriction : cambios.licenseRestriction?.trim() || null,
+      extra: cambios.extra ? await this.extraValidado('conductor', antes.extra, cambios.extra) : antes.extra,
     };
+    // La cédula va aparte: cifrada, con su huella para no repetirla.
+    const clave = loadEnv().ENCRYPTION_KEY;
+    const cedula = cambios.cedula?.replace(/\D/g, '');
+    const documento = cedula
+      ? { documentEncrypted: encryptColumn(clave, cedula), documentHash: documentHash(clave, cedula) }
+      : {};
     const accion =
       despues.active === false && antes.active
         ? 'Desactivó un conductor'
@@ -225,27 +266,35 @@ export class FleetAdminService {
               : 'Quitó los pagos electrónicos a un conductor'
             : 'Editó un conductor';
 
-    await this.db.transaction(async (tx) => {
-      await tx
-        .update(drivers)
-        .set({ ...despues, updatedAt: new Date() })
-        .where(eq(drivers.id, driverId));
+    try {
+      await this.db.transaction(async (tx) => {
+        await tx
+          .update(drivers)
+          .set({ ...despues, ...documento, updatedAt: new Date() })
+          .where(eq(drivers.id, driverId));
 
-      await this.audit.record(
-        {
-          actorId: actor.id,
-          actorName: actor.name,
-          role: actor.role,
-          action: accion,
-          entity: 'drivers',
-          entityId: antes.code,
-          before: antes,
-          after: despues,
-          ip: actor.ip,
-        },
-        tx as unknown as Database,
-      );
-    });
+        await this.audit.record(
+          {
+            actorId: actor.id,
+            actorName: actor.name,
+            role: actor.role,
+            action: accion,
+            entity: 'drivers',
+            entityId: antes.code,
+            before: antes,
+            // La cédula no queda en la bitácora: solo que se cambió.
+            after: cedula ? { ...despues, cedula: 'actualizada' } : despues,
+            ip: actor.ip,
+          },
+          tx as unknown as Database,
+        );
+      });
+    } catch (error) {
+      if (isUniqueViolation(error, 'drivers_document_hash_key')) {
+        throw new AppError('VALIDATION_FAILED', 'Esa cédula ya es de otro conductor.');
+      }
+      throw error;
+    }
 
     /*
      * Desactivar no interrumpe una carrera en curso, y es deliberado: dejar a
@@ -779,24 +828,42 @@ export class FleetAdminService {
         type: vehicles.type,
         capacity: vehicles.capacity,
         active: vehicles.active,
+        brand: vehicles.brand,
+        modelYear: vehicles.modelYear,
+        ownerName: vehicles.ownerName,
+        soatExpiresOn: vehicles.soatExpiresOn,
+        rtoExpiresOn: vehicles.rtoExpiresOn,
+        extra: vehicles.extra,
       })
       .from(vehicles)
       .where(eq(vehicles.id, vehicleId))
       .limit(1);
     if (!antes) throw new AppError('NOT_FOUND', 'El vehículo no existe');
 
+    // Lo que no viene se queda como estaba; lo que viene vacío o nulo se borra.
+    const texto = (nuevo: string | null | undefined, actual: string | null) =>
+      nuevo === undefined ? actual : nuevo?.trim() || null;
     const despues = {
-      internalNumber: cambios.internalNumber === undefined ? antes.internalNumber : cambios.internalNumber?.trim() || null,
+      plate: cambios.plate?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || antes.plate,
+      internalNumber: texto(cambios.internalNumber, antes.internalNumber),
       type: cambios.type ?? antes.type,
       capacity: cambios.capacity ?? antes.capacity,
       active: cambios.active ?? antes.active,
+      brand: texto(cambios.brand, antes.brand),
+      modelYear: cambios.modelYear === undefined ? antes.modelYear : cambios.modelYear,
+      ownerName: texto(cambios.ownerName, antes.ownerName),
+      soatExpiresOn: cambios.soatExpiresOn === undefined ? antes.soatExpiresOn : cambios.soatExpiresOn,
+      rtoExpiresOn: cambios.rtoExpiresOn === undefined ? antes.rtoExpiresOn : cambios.rtoExpiresOn,
+      extra: cambios.extra ? await this.extraValidado('vehiculo', antes.extra, cambios.extra) : antes.extra,
     };
     const accion =
       despues.active !== antes.active
         ? despues.active
           ? 'Activó un vehículo'
           : 'Desactivó un vehículo'
-        : 'Editó un vehículo';
+        : despues.plate !== antes.plate
+          ? 'Corrigió la placa de un vehículo'
+          : 'Editó un vehículo';
 
     try {
       await this.db.transaction(async (tx) => {
@@ -809,7 +876,7 @@ export class FleetAdminService {
             action: accion,
             entity: 'vehicles',
             entityId: antes.plate,
-            before: { internalNumber: antes.internalNumber, type: antes.type, capacity: antes.capacity, active: antes.active },
+            before: antes,
             after: despues,
             ip: actor.ip,
           },
@@ -820,15 +887,134 @@ export class FleetAdminService {
       if (isUniqueViolation(error, 'vehicles_internal_number_key')) {
         throw new AppError('VALIDATION_FAILED', `El número interno ${despues.internalNumber} ya es de otro vehículo.`);
       }
+      if (isUniqueViolation(error, 'vehicles_plate_key')) {
+        throw new AppError('VALIDATION_FAILED', `La placa ${despues.plate} ya es de otro vehículo.`);
+      }
       throw error;
     }
   }
 
+  /* --------------------------------------------------- campos adicionales */
+
+  /** Los campos adicionales que definió la oficina, activos y desactivados. */
+  async listarCamposExtra(): Promise<CampoExtra[]> {
+    return this.db
+      .select({
+        id: camposExtra.id,
+        entidad: camposExtra.entidad,
+        nombre: camposExtra.nombre,
+        tipo: camposExtra.tipo,
+        activo: camposExtra.activo,
+      })
+      .from(camposExtra)
+      .orderBy(camposExtra.entidad, camposExtra.createdAt);
+  }
+
+  async crearCampoExtra(
+    input: { entidad: CampoExtra['entidad']; nombre: string; tipo: CampoExtra['tipo'] },
+    actor: AdminActor,
+  ): Promise<CampoExtra> {
+    const delaEntidad = (await this.listarCamposExtra()).filter((c) => c.entidad === input.entidad && c.activo);
+    if (delaEntidad.length >= MAX_CAMPOS_EXTRA) {
+      throw new AppError('VALIDATION_FAILED', `Ya hay ${MAX_CAMPOS_EXTRA} campos adicionales: desactive uno antes de crear otro.`);
+    }
+    const campo: CampoExtra = { id: uuidv7(), entidad: input.entidad, nombre: input.nombre.trim(), tipo: input.tipo, activo: true };
+    try {
+      await this.db.transaction(async (tx) => {
+        await tx.insert(camposExtra).values(campo);
+        await this.audit.record(
+          {
+            actorId: actor.id,
+            actorName: actor.name,
+            role: actor.role,
+            action: 'Creó un campo adicional',
+            entity: 'campos_extra',
+            entityId: `${campo.entidad}: ${campo.nombre}`,
+            after: { tipo: campo.tipo },
+            ip: actor.ip,
+          },
+          tx as unknown as Database,
+        );
+      });
+    } catch (error) {
+      if (isUniqueViolation(error, 'campos_extra_nombre_key')) {
+        throw new AppError('VALIDATION_FAILED', `Ya existe un campo «${campo.nombre}». Si está desactivado, actívelo de nuevo.`);
+      }
+      throw error;
+    }
+    return campo;
+  }
+
+  /** Cambia el nombre de un campo o lo desactiva. El tipo no se cambia: lo escrito dejaría de servir. */
+  async cambiarCampoExtra(id: string, cambios: { nombre?: string; activo?: boolean }, actor: AdminActor): Promise<void> {
+    const [antes] = await this.db.select().from(camposExtra).where(eq(camposExtra.id, id)).limit(1);
+    if (!antes) throw new AppError('NOT_FOUND', 'Ese campo no existe');
+    const despues = { nombre: cambios.nombre?.trim() || antes.nombre, activo: cambios.activo ?? antes.activo };
+    try {
+      await this.db.transaction(async (tx) => {
+        await tx.update(camposExtra).set(despues).where(eq(camposExtra.id, id));
+        await this.audit.record(
+          {
+            actorId: actor.id,
+            actorName: actor.name,
+            role: actor.role,
+            action: despues.activo !== antes.activo ? (despues.activo ? 'Activó un campo adicional' : 'Desactivó un campo adicional') : 'Cambió el nombre de un campo adicional',
+            entity: 'campos_extra',
+            entityId: `${antes.entidad}: ${antes.nombre}`,
+            before: { nombre: antes.nombre, activo: antes.activo },
+            after: despues,
+            ip: actor.ip,
+          },
+          tx as unknown as Database,
+        );
+      });
+    } catch (error) {
+      if (isUniqueViolation(error, 'campos_extra_nombre_key')) {
+        throw new AppError('VALIDATION_FAILED', `Ya existe un campo «${despues.nombre}».`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Los valores adicionales de una ficha tras aplicar los cambios: solo de
+   * campos activos de esa entidad, con el formato de su tipo. Vacío borra.
+   */
+  private async extraValidado(
+    entidad: CampoExtra['entidad'],
+    actual: Record<string, string>,
+    cambios: Record<string, string>,
+  ): Promise<Record<string, string>> {
+    const campos = new Map((await this.listarCamposExtra()).filter((c) => c.entidad === entidad && c.activo).map((c) => [c.id, c]));
+    const resultado = { ...actual };
+    for (const [id, valor] of Object.entries(cambios)) {
+      const campo = campos.get(id);
+      if (!campo) {
+        // De un campo desactivado solo se rechaza escribir algo nuevo: lo que
+        // la ficha ya traía viaja de vuelta tal cual y no es un cambio.
+        if ((actual[id] ?? '') === valor.trim()) continue;
+        throw new AppError('VALIDATION_FAILED', 'Uno de los campos adicionales ya no está en uso: recargue la página.');
+      }
+      if (!valorDeCampoExtraValido(campo.tipo, valor)) {
+        throw new AppError('VALIDATION_FAILED', `«${campo.nombre}» no tiene un valor válido.`);
+      }
+      const limpio = valor.trim();
+      if (limpio === '') delete resultado[id];
+      else resultado[id] = limpio;
+    }
+    return resultado;
+  }
+
   /* ----------------------------------------------------------- consultas */
 
-  /** Placas dadas de alta, para elegir sin escribirlas a mano. */
+  /**
+   * Los vehículos dados de alta, cada uno con quiénes lo pueden manejar.
+   *
+   * `quienes` son los nombres (26/11/2026): antes solo iba la cuenta, y para
+   * saber quién maneja un carro había que abrir conductor por conductor.
+   */
   async listVehicles() {
-    return this.db
+    const filas = await this.db
       .select({
         id: vehicles.id,
         plate: vehicles.plate,
@@ -838,6 +1024,10 @@ export class FleetAdminService {
         active: vehicles.active,
         brand: vehicles.brand,
         modelYear: vehicles.modelYear,
+        ownerName: vehicles.ownerName,
+        soatExpiresOn: vehicles.soatExpiresOn,
+        rtoExpiresOn: vehicles.rtoExpiresOn,
+        extra: vehicles.extra,
         /*
          * Cuántos conductores vigentes lo tienen permitido.
          *
@@ -854,6 +1044,25 @@ export class FleetAdminService {
       })
       .from(vehicles)
       .orderBy(vehicles.internalNumber, vehicles.plate);
+
+    const vinculos = await this.db
+      .select({
+        vehicleId: vehicleDrivers.vehicleId,
+        id: drivers.id,
+        code: drivers.code,
+        name: drivers.name,
+        activo: drivers.active,
+        rol: vehicleDrivers.role,
+      })
+      .from(vehicleDrivers)
+      .innerJoin(drivers, eq(drivers.id, vehicleDrivers.driverId))
+      .where(isNull(drivers.eliminadoAt))
+      .orderBy(drivers.name);
+    const porVehiculo = new Map<string, { id: string; code: string; name: string; activo: boolean; rol: string }[]>();
+    for (const { vehicleId, ...quien } of vinculos) {
+      porVehiculo.set(vehicleId, [...(porVehiculo.get(vehicleId) ?? []), quien]);
+    }
+    return filas.map((fila) => ({ ...fila, quienes: porVehiculo.get(fila.id) ?? [] }));
   }
 
   /** Si tiene turno abierto; la oficina lo necesita antes de desactivarlo. */

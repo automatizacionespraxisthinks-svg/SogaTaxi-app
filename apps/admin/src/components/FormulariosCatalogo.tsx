@@ -13,9 +13,9 @@ import {
   nucleoDe,
   nuevaZonaSchema,
   nuevoLugarSchema,
-  pointInPolygon,
+  zonaMasCercana,
   poligonoCircular,
-  poligonosSeTocan,
+  zonasEncimadas,
 } from '@tax/shared';
 import { Banner, Button, Field, Input, Modal, SectionLabel, Segmented, cn, useToast } from '@tax/ui';
 import { ApiError, api } from '../api/client';
@@ -69,7 +69,7 @@ export function FormularioZona({ open, onClose }: { open: boolean; onClose: () =
   const encima =
     centro && radio > 0
       ? zonas.find((z) =>
-          poligonosSeTocan(
+          zonasEncimadas(
             poligonoCircular(centro.lat, centro.lng, radio).coordinates[0]!.map(([lng, lat]) => ({ lat, lng })),
             z.polygon,
           ),
@@ -89,7 +89,7 @@ export function FormularioZona({ open, onClose }: { open: boolean; onClose: () =
       toast.push({
         tone: 'positive',
         title: 'Zona creada',
-        description: `${nombre.trim()}: desde ya se despachan carreras ahí, con las oleadas de ${tipo === 'urbano' ? 'casco urbano' : 'vereda'}.`,
+        description: `${nombre.trim()}: las carreras que se pidan ahí o cerca se cuentan en esta zona.`,
       });
       onClose();
     } catch (causa) {
@@ -105,7 +105,7 @@ export function FormularioZona({ open, onClose }: { open: boolean; onClose: () =
       onClose={onClose}
       width="lg"
       title="Nueva zona"
-      subtitle="Un círculo donde hay servicio. Las carreras que se piden dentro se despachan con sus oleadas."
+      subtitle="Un barrio o una vereda, como círculo. Sirve para las estadísticas: el despacho es por cercanía y no depende de la zona."
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
@@ -123,7 +123,7 @@ export function FormularioZona({ open, onClose }: { open: boolean; onClose: () =
             <Input autoFocus value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Vereda Rincón de España" />
           </Field>
 
-          <Field label="Tipo" hint="Decide las oleadas con que se despacha: estrechas en el casco, anchas en vereda.">
+          <Field label="Tipo" hint="Barrio del casco urbano o vereda. Solo clasifica: no cambia a quién se le avisa.">
             <Segmented<'urbano' | 'rural'>
               value={tipo}
               onChange={cambiarTipo}
@@ -224,7 +224,7 @@ export function FormularioMoverZona({
   const encima =
     centro && radio > 0
       ? otras.find((z) =>
-          poligonosSeTocan(
+          zonasEncimadas(
             poligonoCircular(centro.lat, centro.lng, radio).coordinates[0]!.map(([lng, lat]) => ({ lat, lng })),
             z.polygon,
           ),
@@ -401,13 +401,12 @@ export function FormularioLugar({
     }
   };
 
-  const zona = punto ? zonas.find((z) => pointInPolygon(punto, z.polygon)) : undefined;
+  // Dentro de una zona o cerca de una: la misma regla con la que la API anota el lugar.
+  const zona = punto ? zonaMasCercana(punto, zonas)?.zona : undefined;
   const entrada = { name: nombre, aliases: palabras, point: punto };
   const invalido = !punto
     ? 'Toca el mapa para poner el punto del lugar'
-    : !zona
-      ? 'El punto queda fuera de las zonas con servicio'
-      : ocupadas.get(nucleoDe(nombre))
+    : ocupadas.get(nucleoDe(nombre))
         ? `«${nombre.trim()}» ya está en el catálogo como «${ocupadas.get(nucleoDe(nombre))}»`
         : primerError(nuevoLugarSchema.safeParse(entrada));
 
@@ -586,9 +585,9 @@ export function FormularioLugar({
                 {zona.kind === 'rural' ? 'vereda' : 'casco urbano'}
               </p>
             ) : (
-              <p className="flex items-center gap-1.5 text-caption text-[var(--t-critical-ink)]">
-                <AlertTriangle className="size-3.5" />
-                Fuera de las zonas con servicio: allí no se despacha.
+              <p className="text-caption text-ink-secondary">
+                No está en ninguna zona definida: se guarda sin zona. El despacho es por cercanía y no
+                la necesita; solo no contará en las estadísticas de un barrio.
               </p>
             )
           ) : null}

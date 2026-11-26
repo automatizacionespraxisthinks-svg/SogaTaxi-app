@@ -4,6 +4,7 @@ import { Car, Check, Pencil, Plus, Search } from 'lucide-react';
 import type { VehicleType } from '@tax/shared';
 import { VEHICLE_TYPES, VEHICLE_TYPE_LABEL } from '@tax/shared';
 import { Banner, Button, Card, EmptyState, Field, Input, Modal, Select, StatusPill, cn, useToast } from '@tax/ui';
+import { CamposExtraDeLaFicha, camposExtraValidos, soloCamposEnUso, useCamposExtra } from './CamposExtra';
 import { ApiError, api } from '../api/client';
 import { actions } from '../live/store';
 
@@ -25,8 +26,16 @@ export interface Vehiculo {
   active: boolean;
   brand: string | null;
   modelYear: number | null;
+  ownerName: string | null;
+  /** `AAAA-MM-DD`. */
+  soatExpiresOn: string | null;
+  rtoExpiresOn: string | null;
+  /** Campos adicionales de la oficina, por id del campo. */
+  extra: Record<string, string>;
   /** Conductores vigentes que lo tienen permitido. */
   conductores: number;
+  /** Quiénes son: los conductores que lo pueden manejar. */
+  quienes?: { id: string; code: string; name: string; activo: boolean; rol: string }[];
 }
 
 export function useVehiculos(enabled = true) {
@@ -311,26 +320,59 @@ function FormularioVehiculo({ vehiculo, onCerrar }: { vehiculo: Vehiculo | null;
     type: vehiculo?.type ?? 'sedan',
     capacity: String(vehiculo?.capacity ?? 4),
   }));
+  // Lo demás de la ficha (26/11/2026): antes solo entraba con la carga masiva.
+  const [mas, setMas] = useState(() => ({
+    brand: vehiculo?.brand ?? '',
+    modelYear: vehiculo?.modelYear ? String(vehiculo.modelYear) : '',
+    ownerName: vehiculo?.ownerName ?? '',
+    soat: vehiculo?.soatExpiresOn ?? '',
+    rto: vehiculo?.rtoExpiresOn ?? '',
+  }));
+  const [extra, setExtra] = useState<Record<string, string>>(vehiculo?.extra ?? {});
+  const campos = useCamposExtra().data ?? [];
   const [error, setError] = useState<string | null>(null);
 
   const capacidad = Number(datos.capacity);
+  const anio = mas.modelYear === '' ? null : Number(mas.modelYear);
+  const anioValido = anio === null || (Number.isInteger(anio) && anio >= 1980 && anio <= 2035);
   const listo =
-    (vehiculo !== null || datos.plate.trim().length >= 5) && Number.isInteger(capacidad) && capacidad >= 1 && capacidad <= 20;
+    datos.plate.trim().length >= 5 &&
+    Number.isInteger(capacidad) &&
+    capacidad >= 1 &&
+    capacidad <= 20 &&
+    anioValido &&
+    camposExtraValidos(campos, 'vehiculo', extra);
+  const ficha = {
+    brand: mas.brand.trim() || null,
+    modelYear: anio,
+    ownerName: mas.ownerName.trim() || null,
+    soatExpiresOn: mas.soat || null,
+    rtoExpiresOn: mas.rto || null,
+    extra: soloCamposEnUso(campos, 'vehiculo', extra),
+  };
 
   const guardar = useMutation({
-    mutationFn: () =>
-      vehiculo
-        ? api.patch(`/v1/admin/vehicles/${vehiculo.id}`, {
-            internalNumber: datos.internalNumber.trim() || null,
-            type: datos.type,
-            capacity: capacidad,
-          })
-        : api.post('/v1/admin/vehicles', {
-            plate: datos.plate.trim(),
-            internalNumber: datos.internalNumber.trim() || undefined,
-            type: datos.type,
-            capacity: capacidad,
-          }),
+    mutationFn: async () => {
+      if (vehiculo) {
+        await api.patch(`/v1/admin/vehicles/${vehiculo.id}`, {
+          ...(datos.plate.trim() !== vehiculo.plate ? { plate: datos.plate.trim() } : {}),
+          internalNumber: datos.internalNumber.trim() || null,
+          type: datos.type,
+          capacity: capacidad,
+          ...ficha,
+        });
+        return;
+      }
+      const creado = await api.post<{ id: string }>('/v1/admin/vehicles', {
+        plate: datos.plate.trim(),
+        internalNumber: datos.internalNumber.trim() || undefined,
+        type: datos.type,
+        capacity: capacidad,
+      });
+      // El alta solo recibe lo básico: el resto de la ficha se guarda enseguida.
+      const hayMas = ficha.brand || ficha.modelYear || ficha.ownerName || ficha.soatExpiresOn || ficha.rtoExpiresOn || Object.values(extra).some((v) => v.trim());
+      if (hayMas) await api.patch(`/v1/admin/vehicles/${creado.id}`, ficha);
+    },
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ['vehiculos'] });
       await actions.refreshDrivers();
@@ -345,7 +387,7 @@ function FormularioVehiculo({ vehiculo, onCerrar }: { vehiculo: Vehiculo | null;
       open
       onClose={onCerrar}
       title={vehiculo ? `Editar ${vehiculo.plate}` : 'Nuevo vehículo'}
-      subtitle={vehiculo ? 'La placa no se cambia: identifica al vehículo en su historial.' : undefined}
+      subtitle={vehiculo ? 'La placa se puede corregir si quedó mal escrita; el cambio queda en la auditoría.' : undefined}
       footer={
         <>
           <Button variant="secondary" onClick={onCerrar}>
@@ -359,12 +401,11 @@ function FormularioVehiculo({ vehiculo, onCerrar }: { vehiculo: Vehiculo | null;
     >
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Placa" htmlFor="v-placa" required={!vehiculo}>
+          <Field label="Placa" htmlFor="v-placa" required>
             <Input
               id="v-placa"
               autoCapitalize="characters"
               placeholder="UBP472"
-              disabled={vehiculo !== null}
               value={datos.plate}
               onChange={(e) => setDatos({ ...datos, plate: e.target.value.toUpperCase() })}
               className="font-mono"
@@ -403,7 +444,52 @@ function FormularioVehiculo({ vehiculo, onCerrar }: { vehiculo: Vehiculo | null;
               onChange={(e) => setDatos({ ...datos, capacity: e.target.value.replace(/\D/g, '') })}
             />
           </Field>
+          <Field label="Marca y línea" htmlFor="v-marca">
+            <Input id="v-marca" maxLength={60} placeholder="RENAULT CLIO" value={mas.brand} onChange={(e) => setMas({ ...mas, brand: e.target.value.toUpperCase() })} />
+          </Field>
+          <Field label="Modelo (año)" htmlFor="v-anio" hint={anioValido ? undefined : 'Un año entre 1980 y 2035'}>
+            <Input id="v-anio" inputMode="numeric" maxLength={4} placeholder="2018" value={mas.modelYear} onChange={(e) => setMas({ ...mas, modelYear: e.target.value.replace(/\D/g, '') })} />
+          </Field>
+          <Field label="Vence el SOAT" htmlFor="v-soat" hint="El panel avisa antes de que venza.">
+            <Input id="v-soat" type="date" value={mas.soat} onChange={(e) => setMas({ ...mas, soat: e.target.value })} />
+          </Field>
+          <Field label="Vence la revisión técnico-mecánica" htmlFor="v-rto">
+            <Input id="v-rto" type="date" value={mas.rto} onChange={(e) => setMas({ ...mas, rto: e.target.value })} />
+          </Field>
         </div>
+        <Field label="Propietario" htmlFor="v-propietario">
+          <Input id="v-propietario" maxLength={120} value={mas.ownerName} onChange={(e) => setMas({ ...mas, ownerName: e.target.value })} />
+        </Field>
+        <CamposExtraDeLaFicha entidad="vehiculo" valores={extra} onCambiar={setExtra} />
+        {vehiculo ? (
+          <div className="rounded-md border border-line px-3 py-2.5">
+            <p className="text-base text-ink">
+              Lo pueden manejar{' '}
+              <span className="tnum font-semibold">{vehiculo.quienes?.length ?? 0}</span>{' '}
+              {(vehiculo.quienes?.length ?? 0) === 1 ? 'conductor' : 'conductores'}
+            </p>
+            {vehiculo.quienes?.length ? (
+              <ul className="mt-1 space-y-0.5">
+                {vehiculo.quienes.map((q) => (
+                  <li key={q.id} className="flex items-baseline justify-between gap-3 text-caption text-ink-secondary">
+                    <span className="truncate">
+                      {q.name}
+                      {q.activo ? '' : ' (desactivado)'}
+                    </span>
+                    <span className="tnum shrink-0 text-micro text-ink-muted">
+                      {q.rol === 'relevador' ? 'relevo · ' : ''}código {q.code}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-1 text-micro text-ink-muted">Nadie todavía.</p>
+            )}
+            <p className="mt-2 text-micro text-ink-muted">
+              Se asignan desde la ficha de cada conductor, en «Vehículos que puede manejar».
+            </p>
+          </div>
+        ) : null}
         {error ? <Banner tone="critical">{error}</Banner> : null}
       </div>
     </Modal>

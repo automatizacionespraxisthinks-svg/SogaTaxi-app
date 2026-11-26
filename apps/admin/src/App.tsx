@@ -13,6 +13,7 @@ import { Operacion } from './pages/Operacion';
 import { Carreras } from './pages/Carreras';
 import { Flota } from './pages/Flota';
 import { Zonas } from './pages/Zonas';
+import { Avisos } from './pages/Avisos';
 import { Reportes } from './pages/Reportes';
 import { Sistema } from './pages/Sistema';
 
@@ -62,6 +63,7 @@ function AnimatedRoutes() {
           <Route path="/carreras/:rideId" element={<Carreras />} />
           <Route path="/flota" element={<Flota />} />
           <Route path="/zonas" element={<Zonas />} />
+          <Route path="/avisos" element={<Avisos />} />
           <Route
             path="/reportes"
             element={

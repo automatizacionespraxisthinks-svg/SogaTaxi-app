@@ -36,7 +36,8 @@ import { CENTRO } from './coordenadas';
  *
  *   pnpm --filter @tax/api exec tsx src/test/e2e-relanzar.ts <clave-de-api>
  *
- * Necesita la API con `OLEADA_FINAL_A_TODOS` encendida, que es lo normal.
+ * La cuarta ronda es «los más cercanos que haya» (26/11/2026): llega al
+ * conductor lejano porque en 3 km no hay nadie.
  */
 
 const BASE = process.env.API_BASE ?? 'http://localhost:3000';

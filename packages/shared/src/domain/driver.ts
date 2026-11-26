@@ -57,6 +57,10 @@ export interface Driver {
   /** Del listado maestro: vencimiento de la licencia (`AAAA-MM-DD`) y su restricción. */
   licenciaVence?: string;
   licenciaRestriccion?: string;
+  /** Si tiene la cédula registrada. La cédula en sí no viaja al panel. */
+  tieneCedula?: boolean;
+  /** Los campos adicionales de la oficina, por id del campo. */
+  extra?: Record<string, string>;
   /** Los móviles a los que está vinculado, como conductor o relevador. */
   moviles?: MovilVinculado[];
   shiftStartedAt?: string;
@@ -66,4 +70,48 @@ export interface Driver {
    */
   fueraDeListado?: boolean;
   deviceRegistered: boolean;
+}
+
+/* -------------------------------------------------- campos adicionales --- */
+
+/**
+ * Un campo adicional que definió la oficina para los conductores o para los
+ * vehículos (26/11/2026): un dato que el sistema no trae de fábrica.
+ */
+export interface CampoExtra {
+  id: string;
+  entidad: 'conductor' | 'vehiculo';
+  nombre: string;
+  tipo: 'texto' | 'numero' | 'fecha';
+  activo: boolean;
+}
+
+export const TIPO_DE_CAMPO_EXTRA: Record<CampoExtra['tipo'], string> = {
+  texto: 'Texto',
+  numero: 'Número',
+  fecha: 'Fecha',
+};
+
+/** Cuántos campos adicionales admite cada ficha: más ya no es una ficha. */
+export const MAX_CAMPOS_EXTRA = 20;
+
+/**
+ * Si un texto es una fecha `AAAA-MM-DD` que existe. `Date.parse` no basta:
+ * acepta «2026-02-31» y lo convierte en el 3 de marzo; la base no, y la
+ * petición acababa en un error 500 en vez de un aviso claro.
+ */
+export function fechaIsoValida(valor: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(valor)) return false;
+  const fecha = new Date(`${valor}T00:00:00Z`);
+  return !Number.isNaN(fecha.getTime()) && fecha.toISOString().slice(0, 10) === valor;
+}
+
+/** Si un valor sirve para un campo de ese tipo. Vacío siempre sirve: lo borra. */
+export function valorDeCampoExtraValido(tipo: CampoExtra['tipo'], valor: string): boolean {
+  const v = valor.trim();
+  if (v === '') return true;
+  if (v.length > 200) return false;
+  if (tipo === 'numero') return /^-?\d+([.,]\d+)?$/.test(v);
+  if (tipo === 'fecha') return fechaIsoValida(v);
+  return true;
 }

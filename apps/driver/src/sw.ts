@@ -130,8 +130,9 @@ worker.addEventListener('push', ((event: PushEvent) => {
         // en pantalla hasta que el conductor lo atienda.
         requireInteraction: true,
         silent: false,
-        // Urgente: vibración larga e insistente, para que se note en el bolsillo.
-        vibrate: aviso.urgente ? [600, 200, 600, 200, 600, 200, 1200] : [300, 150, 300],
+        // Urgente: vibración más marcada, para que se note en el bolsillo, pero
+        // de menos de dos segundos (26/11/2026): con tantas carreras, cansaba.
+        vibrate: aviso.urgente ? [500, 150, 500, 150, 600] : [300, 150, 300],
         data: { rideId: aviso.rideId },
         icon: '/icon-192.png',
         // Android solo mira la forma del icono pequeño de la barra de avisos.

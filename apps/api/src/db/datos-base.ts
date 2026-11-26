@@ -1,5 +1,5 @@
 import { uuidv7 } from 'uuidv7';
-import { poligonoCircular } from '@tax/shared';
+import { RONDAS_DE_DESPACHO, poligonoCircular } from '@tax/shared';
 import type { Database } from './db.module';
 import * as schema from './schema';
 
@@ -41,18 +41,14 @@ export const ZONES = [
   { name: 'Centro', kind: 'urbano' as const, lat: 5.7148, lng: -72.9279, radioKm: 2.0, tortuosity: 1.3 },
 ];
 
-/** En lo urbano la oleada 1 es estrecha y rápida; en vereda, ancha y paciente. */
-export const URBAN_WAVES = [
-  { wave: 1 as const, radiusKm: 1.5, candidates: 3, timeoutSeconds: 45 },
-  { wave: 2 as const, radiusKm: 3.5, candidates: 5, timeoutSeconds: 60 },
-  { wave: 3 as const, radiusKm: 12, candidates: 12, timeoutSeconds: 90 },
-];
-
-export const RURAL_WAVES = [
-  { wave: 1 as const, radiusKm: 5, candidates: 3, timeoutSeconds: 70 },
-  { wave: 2 as const, radiusKm: 10, candidates: 6, timeoutSeconds: 90 },
-  { wave: 3 as const, radiusKm: 20, candidates: 14, timeoutSeconds: 120 },
-];
+/**
+ * Las rondas con que nace una zona: las de toda la ciudad. Desde el
+ * 26/11/2026 el despacho es por cercanía y no depende de la zona; la columna
+ * `zones.waves` se conserva porque es donde el panel guarda la regla, igual
+ * en todas (`CatalogoService.cambiarZona` las mantiene iguales).
+ */
+export const URBAN_WAVES = RONDAS_DE_DESPACHO;
+export const RURAL_WAVES = RONDAS_DE_DESPACHO;
 
 export async function sembrarZonas(db: Database): Promise<number> {
   for (const zone of ZONES) {

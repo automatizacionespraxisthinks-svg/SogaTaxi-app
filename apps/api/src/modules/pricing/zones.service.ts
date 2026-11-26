@@ -1,9 +1,17 @@
 import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { asc, eq } from 'drizzle-orm';
 import booleanPointInPolygon from '@turf/boolean-point-in-polygon';
-import type { Point, WaveConfig } from '@tax/shared';
+import {
+  AJUSTES_DESPACHO_DE_FABRICA,
+  type AjustesDespacho,
+  ZONA_CERCANA_MAX_KM,
+  centroYRadioDe,
+  haversineKm,
+  type Point,
+  type WaveConfig,
+} from '@tax/shared';
 import { DB, type Database } from '../../db/db.module';
-import { zones } from '../../db/schema';
+import { dispatchSettings, zones } from '../../db/schema';
 import type { GeoJsonPolygon } from '../../db/schema/geo';
 
 export interface LoadedZone {
@@ -15,6 +23,9 @@ export interface LoadedZone {
   polygon: GeoJsonPolygon;
   /** El punto de partida de las carreras que no se pudieron ubicar. */
   esReferencia: boolean;
+  /** Centro y radio del círculo, leídos del polígono al cargar. */
+  center: Point;
+  radiusKm: number;
 }
 
 /**
@@ -29,6 +40,7 @@ export interface LoadedZone {
 export class ZonesService implements OnModuleInit {
   private readonly logger = new Logger(ZonesService.name);
   private cache: LoadedZone[] = [];
+  private ajustes: AjustesDespacho = AJUSTES_DESPACHO_DE_FABRICA;
 
   constructor(@Inject(DB) private readonly db: Database) {}
 
@@ -51,9 +63,20 @@ export class ZonesService implements OnModuleInit {
         waves: row.waves,
         polygon: row.polygon,
         esReferencia: row.esReferencia,
+        ...centroYRadioDe((row.polygon.coordinates[0] ?? []).map(([lng, lat]) => ({ lat, lng }))),
       }));
 
     this.logger.log(`Zonas cargadas en memoria: ${this.cache.length}`);
+
+    // Los ajustes del despacho, de la misma ida: sin fila valen los de fábrica.
+    const [fila] = await this.db.select().from(dispatchSettings).limit(1);
+    this.ajustes = fila
+      ? {
+          rondas: [...fila.rondas].sort((a, b) => a.wave - b.wave) as AjustesDespacho['rondas'],
+          lejanos: { candidatos: fila.lejanosCandidatos, hastaKm: fila.lejanosKm, margenKm: fila.lejanosMargenKm },
+          posicionMaximaMin: fila.posicionMaximaMin,
+        }
+      : AJUSTES_DESPACHO_DE_FABRICA;
   }
 
   all(): LoadedZone[] {
@@ -72,7 +95,33 @@ export class ZonesService implements OnModuleInit {
   classify(point: Point): LoadedZone | undefined {
     // GeoJSON va en [lng, lat]; confundir el orden es el error clásico aquí.
     const coordinates: [number, number] = [point.lng, point.lat];
-    return this.cache.find((zone) => booleanPointInPolygon(coordinates, zone.polygon));
+    // Los barrios vecinos se pisan en el borde: gana el del centro más cercano.
+    return this.cache
+      .filter((zone) => booleanPointInPolygon(coordinates, zone.polygon))
+      .sort((a, b) => haversineKm(point, a.center) - haversineKm(point, b.center))[0];
+  }
+
+  /**
+   * La zona de un punto para despachar y para las estadísticas: la que lo
+   * contiene o, si no cae en ninguna, la más cercana (midiendo hasta su
+   * borde) que lo tenga a su alcance: 1 km un barrio, 3 km una vereda
+   * (`ZONA_CERCANA_MAX_KM`).
+   *
+   * No decide la cobertura —eso sigue siendo `classify` más Google, en
+   * `GeocodingService.cobertura`—: aquí solo llegan puntos ya aceptados.
+   */
+  masCercana(point: Point): { zona: LoadedZone; dentro: boolean; aKm: number } | undefined {
+    const dentro = this.classify(point);
+    if (dentro) return { zona: dentro, dentro: true, aKm: 0 };
+
+    let mejor: { zona: LoadedZone; aKm: number } | undefined;
+    for (const zona of this.cache) {
+      const aKm = Math.max(0, haversineKm(point, zona.center) - zona.radiusKm);
+      if (aKm > ZONA_CERCANA_MAX_KM[zona.kind]) continue;
+      if (!mejor || aKm < mejor.aKm) mejor = { zona, aKm };
+    }
+    if (!mejor) return undefined;
+    return { zona: mejor.zona, dentro: false, aKm: Math.round(mejor.aKm * 100) / 100 };
   }
 
   /**
@@ -127,19 +176,20 @@ export class ZonesService implements OnModuleInit {
     };
   }
 
-  /** Parámetros de la oleada N para una zona, con respaldo razonable. */
-  waveConfig(zoneId: string | null, wave: 1 | 2 | 3): WaveConfig {
-    const zone = zoneId ? this.byId(zoneId) : undefined;
-    const configured = zone?.waves.find((w) => w.wave === wave);
-    if (configured) return configured;
+  /**
+   * Los ajustes del despacho, una sola regla para toda la ciudad (26/11/2026).
+   *
+   * El despacho es por cercanía —todos los taxis del rango, y el rango se va
+   * ampliando— y no depende de en qué barrio cae el punto: los barrios son
+   * para las estadísticas. Los ajustes viven en `dispatch_settings` y se
+   * cambian desde el panel; se cargan en memoria junto con las zonas.
+   */
+  ajustesDespacho(): AjustesDespacho {
+    return this.ajustes;
+  }
 
-    // Si una zona no tiene configurada la oleada, se usa un valor creciente
-    // en vez de dejar la carrera sin despachar.
-    const fallback: Record<1 | 2 | 3, WaveConfig> = {
-      1: { wave: 1, radiusKm: 2, candidates: 3, timeoutSeconds: 45 },
-      2: { wave: 2, radiusKm: 5, candidates: 6, timeoutSeconds: 60 },
-      3: { wave: 3, radiusKm: 15, candidates: 12, timeoutSeconds: 90 },
-    };
-    return fallback[wave];
+  /** Los parámetros de la ronda N. */
+  waveConfig(wave: 1 | 2 | 3): WaveConfig {
+    return this.ajustes.rondas.find((r) => r.wave === wave) ?? AJUSTES_DESPACHO_DE_FABRICA.rondas[wave - 1]!;
   }
 }

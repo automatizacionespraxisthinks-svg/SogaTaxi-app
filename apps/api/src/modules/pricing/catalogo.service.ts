@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, ne, sql } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
-import type { CambiosLugar, CambiosZona, NuevaZona, NuevoLugar, Point } from '@tax/shared';
+import type { AjustesDespacho, CambiosLugar, CambiosZona, NuevaZona, NuevoLugar, Point } from '@tax/shared';
 import {
   ZONA_POR_DEFECTO,
   buscarLugar,
@@ -9,11 +9,11 @@ import {
   haversineKm,
   nucleoDe,
   poligonoCircular,
-  poligonosSeTocan,
+  zonasEncimadas,
 } from '@tax/shared';
 import { DB, type Database } from '../../db/db.module';
-import { places, zones } from '../../db/schema';
-import { RURAL_WAVES, URBAN_WAVES } from '../../db/datos-base';
+import { dispatchSettings, places, zones } from '../../db/schema';
+import { dentroDelMunicipio } from '../../db/limite-municipal';
 import { AppError } from '../../common/problem';
 import { isUniqueViolation } from '../../common/pg-errors';
 import { AuditService } from '../audit/audit.service';
@@ -67,11 +67,11 @@ export class CatalogoService {
   async crearZona(entrada: NuevaZona, actor: ActorDelPanel) {
     const poligono = poligonoCircular(entrada.center.lat, entrada.center.lng, entrada.radiusKm);
     const nueva = comoPuntos(poligono.coordinates[0]!);
-    const encima = this.zonas.all().find((z) => poligonosSeTocan(nueva, comoPuntos(z.polygon.coordinates[0] ?? [])));
+    const encima = this.zonas.all().find((z) => zonasEncimadas(nueva, comoPuntos(z.polygon.coordinates[0] ?? [])));
     if (encima) {
       throw new AppError(
         'ZONE_OVERLAP',
-        `Se monta sobre «${encima.name}». Mueve el centro o achica el radio.`,
+        `Queda encima de «${encima.name}». Mueve el centro o achica el radio: pueden ser vecinas, no la misma.`,
       );
     }
 
@@ -82,7 +82,8 @@ export class CatalogoService {
       kind: entrada.kind,
       polygon: poligono,
       tortuosity: entrada.tortuosity ?? ZONA_POR_DEFECTO[entrada.kind].tortuosity,
-      waves: entrada.kind === 'urbano' ? URBAN_WAVES : RURAL_WAVES,
+      // La columna se conserva por historia; el despacho no la lee.
+      waves: this.zonas.ajustesDespacho().rondas,
     };
 
     try {
@@ -113,7 +114,49 @@ export class CatalogoService {
     return { id, name: valores.name };
   }
 
-  /** Las oleadas y el factor de tortuosidad de una zona. */
+  /**
+   * Los ajustes del despacho de toda la ciudad: las rondas por cercanía y
+   * qué hacer cuando no hay ningún taxi en el rango. Una sola fila; el cambio
+   * queda en la bitácora con el antes y el después.
+   */
+  async cambiarAjustesDespacho(ajustes: AjustesDespacho, actor: ActorDelPanel) {
+    const antes = this.zonas.ajustesDespacho();
+    const rondas = [...ajustes.rondas].sort((a, b) => a.wave - b.wave);
+    const valores = {
+      rondas,
+      lejanosCandidatos: ajustes.lejanos.candidatos,
+      lejanosKm: ajustes.lejanos.hastaKm,
+      lejanosMargenKm: ajustes.lejanos.margenKm,
+      posicionMaximaMin: ajustes.posicionMaximaMin,
+      updatedAt: new Date(),
+    };
+
+    await this.db.transaction(async (tx) => {
+      await tx
+        .insert(dispatchSettings)
+        .values({ id: 1, ...valores })
+        .onConflictDoUpdate({ target: dispatchSettings.id, set: valores });
+      await this.audit.record(
+        {
+          actorId: actor.id,
+          actorName: actor.name,
+          role: actor.role,
+          action: 'Cambió los ajustes del despacho',
+          entity: 'dispatch_settings',
+          entityId: 'despacho',
+          before: antes,
+          after: { rondas, lejanos: ajustes.lejanos, posicionMaximaMin: ajustes.posicionMaximaMin },
+          ip: actor.ip,
+        },
+        tx as unknown as Database,
+      );
+    });
+
+    await this.zonas.reload();
+    return this.zonas.ajustesDespacho();
+  }
+
+  /** El factor de tortuosidad de una zona, su sitio y su tamaño. */
   async cambiarZona(zoneId: string, cambios: CambiosZona, actor: ActorDelPanel) {
     const [antes] = await this.db
       .select({
@@ -148,18 +191,18 @@ export class CatalogoService {
       const encima = this.zonas
         .all()
         .filter((z) => z.id !== zoneId)
-        .find((z) => poligonosSeTocan(nueva, comoPuntos(z.polygon.coordinates[0] ?? [])));
+        .find((z) => zonasEncimadas(nueva, comoPuntos(z.polygon.coordinates[0] ?? [])));
       if (encima) {
         throw new AppError(
           'ZONE_OVERLAP',
-          `Se monta sobre «${encima.name}». Mueve el centro o achica el radio.`,
+          `Queda encima de «${encima.name}». Mueve el centro o achica el radio: pueden ser vecinas, no la misma.`,
         );
       }
     }
 
     const despues = {
       tortuosity: cambios.tortuosity ?? antes.tortuosity,
-      waves: cambios.waves ? [...cambios.waves].sort((a, b) => a.wave - b.wave) : antes.waves,
+      waves: antes.waves,
       ...(geometria ? { polygon: geometria } : {}),
     };
 
@@ -191,7 +234,7 @@ export class CatalogoService {
           tx as unknown as Database,
         );
       }
-      if (cambios.tortuosity === undefined && cambios.waves === undefined && !geometria) return;
+      if (cambios.tortuosity === undefined && !geometria) return;
 
       await tx.update(zones).set({ ...despues, updatedAt: new Date() }).where(eq(zones.id, zoneId));
       await this.audit.record(
@@ -199,7 +242,9 @@ export class CatalogoService {
           actorId: actor.id,
           actorName: actor.name,
           role: actor.role,
-          action: geometria ? 'Movió o cambió el tamaño de una zona' : 'Cambió las oleadas de una zona',
+          action: geometria
+            ? 'Movió o cambió el tamaño de una zona'
+            : 'Cambió el factor de una zona',
           entity: 'zones',
           entityId: antes.name,
           /*
@@ -256,7 +301,11 @@ export class CatalogoService {
           action: 'Agregó un lugar al catálogo',
           entity: 'places',
           entityId: entrada.name.trim(),
-          after: { zona: zona.name, aliases, point: entrada.point },
+          after: {
+            zona: zona.id ? (this.zonas.byId(zona.id)?.name ?? null) : 'Sin zona',
+            aliases,
+            point: entrada.point,
+          },
           ip: actor.ip,
         },
         tx as unknown as Database,
@@ -362,12 +411,22 @@ export class CatalogoService {
 
   /* ------------------------------------------------------------- apoyo --- */
 
-  private zonaDelPunto(point: Point) {
-    const zona = this.zonas.classify(point);
-    if (!zona) {
-      throw new AppError('OUT_OF_COVERAGE', 'El punto queda fuera de las zonas con servicio: allí no se despacha');
+  /**
+   * La zona de un lugar: la que lo contiene o la más cercana, igual que las
+   * carreras (`ZonesService.masCercana`). Si no hay ninguna a su alcance, el
+   * lugar se guarda SIN zona (26/11/2026): las zonas son para las
+   * estadísticas y el despacho es por cercanía, así que el hospital o la
+   * terminal no pueden depender de que alguien haya dibujado su barrio. Lo
+   * único que se exige es que el punto sea de Sogamoso.
+   */
+  private zonaDelPunto(point: Point): { id: string | null; kind: 'urbano' | 'rural' } {
+    const zona = this.zonas.masCercana(point)?.zona;
+    if (zona) return { id: zona.id, kind: zona.kind };
+    if (!dentroDelMunicipio(point)) {
+      throw new AppError('OUT_OF_COVERAGE', 'El punto queda fuera de Sogamoso: allí no se despacha.');
     }
-    return zona;
+    // Lejos de todo barrio definido: lo más probable es que sea una vereda.
+    return { id: null, kind: 'rural' };
   }
 
   /**

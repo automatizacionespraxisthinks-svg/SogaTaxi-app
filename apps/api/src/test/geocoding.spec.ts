@@ -407,6 +407,22 @@ describe('GeocodingService', () => {
       expect(llamadas).not.toHaveBeenCalled();
     });
 
+    it('fuera de las zonas pero dentro del límite de Sogamoso entra sin preguntarle a Google', async () => {
+      const llamadas = respuestaDeGoogle(MUNICIPIO('Sogamoso'));
+      globalThis.fetch = llamadas;
+      const servicio = new GeocodingService(hacerRedis(), hacerZonas({ clasifica: false }));
+
+      // La Plaza de la Villa, sin ninguna zona que la contenga.
+      expect(await servicio.cobertura({ lat: 5.71478, lng: -72.92772 })).toEqual({
+        dentro: true,
+        como: 'limite',
+        municipio: 'Sogamoso',
+      });
+      // Nobsa, 6 km al norte: fuera del límite, así que ahí sí decide Google.
+      await servicio.cobertura({ lat: 5.7706, lng: -72.9397 });
+      expect(llamadas).toHaveBeenCalledTimes(1);
+    });
+
     it('fuera de las zonas entra si Google dice Sogamoso', async () => {
       globalThis.fetch = respuestaDeGoogle(MUNICIPIO('Sogamoso'));
       const servicio = new GeocodingService(hacerRedis(), hacerZonas({ clasifica: false }));

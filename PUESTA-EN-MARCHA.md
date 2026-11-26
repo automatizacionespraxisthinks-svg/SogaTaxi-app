@@ -164,7 +164,6 @@ FOTO_HOSTS_PERMITIDOS=chat.sogataxi.praxisia.org
 # N8N_WEBHOOK_SECRET=OTRO_openssl_rand_-hex_32
 
 # Decisiones de la empresa, hoy en su valor por defecto.
-OLEADA_FINAL_A_TODOS=true
 BUSCAR_HASTA_CANCELAR=true
 
 MAX_OPERADORES=5
@@ -247,7 +246,15 @@ La página detecta el teléfono:
 
 ## Paso 6 · Primer arranque
 
-Desde el terminal del contenedor `sogataxi-api` en Dokploy:
+Desde el terminal del contenedor `sogataxi-api` en Dokploy, con **/bin/sh**
+(en Bash, pegar añade caracteres de más). La consola abre en `/`, no en la
+carpeta de la API: lo primero es
+
+```bash
+cd /app/apps/api
+```
+
+o los comandos fallan con `Cannot find module '/dist/cli/...'`.
 
 1. Zonas: `node dist/cli/sembrar-produccion.js`
 2. Primer administrador:

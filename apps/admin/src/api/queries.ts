@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import type { Permiso, Place } from '@tax/shared';
+import type { AvisosDeFlota, Permiso, Place } from '@tax/shared';
 import { api } from './client';
 
 /**
@@ -120,4 +120,18 @@ export function usePuede(): (permiso: Permiso) => boolean {
   const sesion = useSesion();
   const permisos = sesion.data?.user.permissions;
   return (permiso) => permisos?.includes(permiso) ?? false;
+}
+
+/**
+ * Los avisos de la flota: vencimientos y datos que faltan. Se refrescan solos
+ * cada diez minutos y al volver a la pestaña; no hace falta más, cambian por
+ * días, no por segundos.
+ */
+export function useAvisosDeFlota() {
+  return useQuery({
+    queryKey: ['avisos-flota'],
+    queryFn: () => api.get<AvisosDeFlota>('/v1/admin/avisos-flota'),
+    staleTime: 60_000,
+    refetchInterval: 10 * 60_000,
+  });
 }

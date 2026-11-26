@@ -80,21 +80,6 @@ const envSchema = z.object({
    */
   GOOGLE_GEOCODING_API_KEY: z.string().min(20).optional(),
 
-  /**
-   * Tras la tercera oleada, una ronda más a todos los conductores
-   * disponibles, sin mirar distancia, tipo de vehículo ni antigüedad del
-   * GPS. Es para probar los avisos con pocos conductores: con uno solo en
-   * turno lejos del punto, las tres oleadas por radio no lo encuentran
-   * nunca y no se puede ver una notificación de verdad.
-   *
-   * Encendida por defecto mientras se prueba. Para volver al comportamiento
-   * por radio, `OLEADA_FINAL_A_TODOS=false` en el entorno de la API.
-   */
-  OLEADA_FINAL_A_TODOS: z
-    .enum(['true', 'false'])
-    .default('true')
-    .transform((valor) => valor === 'true'),
-
   /*
    * Carreras sin conductor (19/11/2026). Agotadas las oleadas, el sistema la
    * relanza solo tantas veces como diga RELANZAMIENTOS_AUTOMATICOS, esperando
@@ -168,6 +153,19 @@ const envSchema = z.object({
    * que dejar la carrera sin nadie.
    */
   POSITION_MAX_AGE_SECONDS: z.coerce.number().int().min(10).max(600).default(60),
+  /*
+   * La oleada 1 es la de «el taxi que está a pocas cuadras» (26/11/2026). Una
+   * posición de hace más de esto no prueba que el taxi siga ahí, así que ese
+   * conductor no entra en la oleada 1: la recibe desde la 2.
+   *
+   * No se usa POSITION_MAX_AGE_SECONDS (1 min) a propósito: un teléfono
+   * bloqueado deja de reportar —sobre todo la PWA en iPhone— y la empresa
+   * decidió el 3/11/2026 que guardar el celular no puede dejar a un conductor
+   * sin la carrera. Diez minutos deja pasar ese caso y saca al que lleva
+   * media hora sin reportar. Cuando todos usen la app de Android, que reporta
+   * en segundo plano, se puede bajar.
+   */
+  POSITION_OLEADA1_MAX_AGE_SECONDS: z.coerce.number().int().min(30).max(3600).default(600),
 
   /*
    * Cada cuánto manda su posición la PWA, y cada cuánto se guarda en

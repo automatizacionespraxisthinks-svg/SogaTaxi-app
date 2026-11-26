@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { pointSchema } from './geo';
+import { pointSchema, type WaveConfig } from './geo';
 
 /**
  * Estados de la carrera (§5.3 de la arquitectura).
@@ -368,12 +368,38 @@ export interface RideStatusEntry {
 }
 
 /**
- * Las tres oleadas por radio, y una cuarta ronda que avisa a todos los
- * disponibles sin mirar distancia. La cuarta existe para probar los avisos
- * con pocos conductores y se apaga con `OLEADA_FINAL_A_TODOS=false`.
+ * Las tres rondas por cercanía, y una cuarta que ya no mira el tope de
+ * distancia: «los más cercanos que haya» (26/11/2026). Sale cuando en las
+ * tres rondas no hubo NADIE a quien avisar —ningún taxi a 3 km, lo normal en
+ * una vereda—. No sale si hubo a quién avisar y nadie aceptó: ahí la carrera
+ * se relanza cerca.
+ *
+ * Hasta el 26/11/2026 la cuarta era una ronda «a todos» de prueba
+ * (`OLEADA_FINAL_A_TODOS`). Se quitó: era la que hacía cruzar la ciudad, y
+ * dependía de que alguien se acordara de apagarla en producción. Las
+ * carreras viejas la conservan en su registro, sin `masCercanos`.
  */
 export type Oleada = 1 | 2 | 3 | 4;
 export const OLEADA_A_TODOS = 4 as const;
+
+/**
+ * Las rondas de despacho de fábrica, las mismas para toda la ciudad
+ * (26/11/2026). El despacho es por cercanía y no depende de la zona.
+ *
+ * Cada ronda avisa a TODOS los taxis disponibles dentro de su rango, no a
+ * unos pocos (decisión de SogaTaxi): así todos los que están cerca quedan en
+ * las mismas condiciones y se la lleva el primero que acepta. Si nadie la
+ * toma, el rango se amplía y se avisa a los que entran en el nuevo, y así
+ * hasta 3 km. `candidates` es solo un tope de seguridad por ronda: con
+ * `TODOS_EN_EL_RANGO` no recorta a nadie. Son solo el punto de partida: las
+ * vigentes se guardan en la base (`AjustesDespacho`) y se cambian en el panel.
+ */
+export const TODOS_EN_EL_RANGO = 200;
+export const RONDAS_DE_DESPACHO: (WaveConfig & { wave: 1 | 2 | 3 })[] = [
+  { wave: 1, radiusKm: 1, candidates: TODOS_EN_EL_RANGO, timeoutSeconds: 25 },
+  { wave: 2, radiusKm: 2, candidates: TODOS_EN_EL_RANGO, timeoutSeconds: 30 },
+  { wave: 3, radiusKm: 3, candidates: TODOS_EN_EL_RANGO, timeoutSeconds: 40 },
+];
 
 /**
  * Lo que hizo cada oleada, también las que no encontraron a nadie.
@@ -394,8 +420,14 @@ export interface WaveLogEntry {
   startedAt: string;
   /** Cuándo vence. Nulo si no encontró a nadie y escaló en el acto. */
   expiresAt: string | null;
-  /** Radio de búsqueda. Nulo en la ronda a todos, que no mira distancia. */
+  /** Radio de búsqueda. Nulo en la cuarta ronda, que no mira el tope de distancia. */
   radiusKm: number | null;
+  /**
+   * La cuarta ronda fue «los más cercanos que haya»: no había ningún taxi
+   * dentro del tope y se avisó a los más cercanos disponibles. Ausente en
+   * las carreras viejas, cuya cuarta ronda era «a todos».
+   */
+  masCercanos?: boolean;
   /** Conductores nuevos de esta oleada. */
   candidates: number;
   /**

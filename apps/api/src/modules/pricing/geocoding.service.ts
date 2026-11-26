@@ -4,6 +4,7 @@ import { ZONA_HORARIA_LOCAL, type Point } from '@tax/shared';
 import { REDIS, redisKeys } from '../../redis/redis.module';
 import { loadEnv } from '../../config/env';
 import { ZonesService } from './zones.service';
+import { dentroDelMunicipio } from '../../db/limite-municipal';
 
 export interface DireccionResuelta {
   point: Point;
@@ -337,6 +338,8 @@ export class GeocodingService implements OnModuleInit {
    * En orden, del más barato al más caro:
    *
    *  1. Dentro de una zona: es Sogamoso, sin preguntarle a nadie.
+   *  1b. Dentro del límite del municipio (`limite-municipal.ts`): también,
+   *     y tampoco se le paga a Google. Con zonas por barrio es lo normal.
    *  2. Google, con geocodificación inversa: el municipio del punto. Si dice
    *     Sogamoso, entra; si dice otro (Nobsa, Tibasosa, Duitama), no.
    *  3. Si Google no puede contestar (sin clave, caído, sin resultado), el
@@ -346,6 +349,7 @@ export class GeocodingService implements OnModuleInit {
   async cobertura(point: Point): Promise<Cobertura> {
     const zona = this.zones.classify(point);
     if (zona) return { dentro: true, como: 'zona', municipio: MUNICIPIO };
+    if (dentroDelMunicipio(point)) return { dentro: true, como: 'limite', municipio: MUNICIPIO };
 
     const { municipio, motivo } = await this.municipioDe(point);
     if (municipio) {
@@ -732,8 +736,8 @@ export const MUNICIPIO = 'Sogamoso';
 
 export interface Cobertura {
   dentro: boolean;
-  /** Qué lo decidió: una zona, Google, o el rectángulo si Google no pudo. */
-  como: 'zona' | 'google' | 'caja';
+  /** Qué lo decidió: una zona, el límite del municipio, Google, o el rectángulo si Google no pudo. */
+  como: 'zona' | 'limite' | 'google' | 'caja';
   municipio: string | null;
 }
 

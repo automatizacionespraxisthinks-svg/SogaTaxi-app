@@ -54,6 +54,26 @@ export const zones = pgTable(
 );
 
 /**
+ * Los ajustes del despacho: una sola fila, la misma regla para toda la ciudad
+ * (26/11/2026). El despacho es por cercanía y no depende de la zona, así que
+ * las rondas dejaron de vivir en `zones.waves` (que se conserva por historia).
+ * Si la tabla está vacía valen los de fábrica (`AJUSTES_DESPACHO_DE_FABRICA`).
+ */
+export const dispatchSettings = pgTable('dispatch_settings', {
+  /** Siempre 1: la API escribe y lee solo esa fila. */
+  id: integer('id').primaryKey().default(1),
+  rondas: jsonb('rondas').$type<WaveConfig[]>().notNull(),
+  /** Taxis a avisar cuando no hay ninguno dentro del tope; 0 lo apaga. */
+  lejanosCandidatos: integer('lejanos_candidatos').notNull(),
+  lejanosKm: doublePrecision('lejanos_km').notNull(),
+  /** Cuánto más lejos que el más cercano puede estar otro para recibirla también. */
+  lejanosMargenKm: doublePrecision('lejanos_margen_km').notNull().default(1),
+  /** Minutos sin reportar posición a partir de los cuales no se le ofrece nada. */
+  posicionMaximaMin: integer('posicion_maxima_min').notNull().default(30),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
  * Catálogo de lugares: la segunda capa de geocodificación, cuando el cliente
  * no manda ubicación de WhatsApp (§7 del contexto, driver «ubicación rural
  * imprecisa»).

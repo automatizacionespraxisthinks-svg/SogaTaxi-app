@@ -127,6 +127,12 @@ export const IconButton = forwardRef<HTMLButtonElement, ButtonProps & { label: s
         size={size}
         className={cn('aspect-square px-0', size === 'sm' ? 'w-7' : size === 'lg' ? 'w-11' : 'w-9', className)}
         {...rest}
+        /*
+         * El relleno va en línea, no solo como clase: `px-0` perdía contra el
+         * `px-…` del tamaño y, con el botón cuadrado, al icono le quedaban 2 px
+         * de ancho. La X de cerrar se veía como un punto (26/11/2026).
+         */
+        style={{ paddingInline: 0, ...rest.style }}
       />
     );
   },

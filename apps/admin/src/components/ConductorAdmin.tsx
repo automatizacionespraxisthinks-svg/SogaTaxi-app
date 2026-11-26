@@ -25,6 +25,7 @@ import {
 import { ApiError, api } from '../api/client';
 import { actions } from '../live/store';
 import { SelectorDeVehiculos, useVehiculos } from './VehiculosAdmin';
+import { EditarConductor } from './EditarConductor';
 
 /**
  * Gestión de conductores desde la oficina (§6, §8.1).
@@ -431,6 +432,7 @@ export function GestionConductor({
   rideCode?: string;
 }) {
   const [pinNuevo, setPinNuevo] = useState<string | null>(null);
+  const [editando, setEditando] = useState(false);
   const toast = useToast();
   const qc = useQueryClient();
 
@@ -523,6 +525,21 @@ export function GestionConductor({
         <SectionLabel>Gestión</SectionLabel>
 
         <div className="mt-2 space-y-3 rounded-md border border-line p-3">
+          {gestionar ? (
+            <div className="flex items-center justify-between gap-3 border-b border-line pb-3">
+              <div className="min-w-0">
+                <p className="text-base text-ink">Datos del conductor</p>
+                <p className="text-micro text-ink-muted">
+                  Nombre, celular, cédula, vencimiento de la licencia y los campos adicionales.
+                  {driver.tieneCedula ? '' : ' Le falta la cédula.'}
+                </p>
+              </div>
+              <Button size="sm" variant="primary" onClick={() => setEditando(true)}>
+                Editar datos
+              </Button>
+            </div>
+          ) : null}
+          {editando ? <EditarConductor driver={driver} onCerrar={() => setEditando(false)} /> : null}
           {gestionar ? (
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">

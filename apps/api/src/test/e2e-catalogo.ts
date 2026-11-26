@@ -87,7 +87,6 @@ async function main() {
     const creada = (zonas.body as unknown as { id: string; kind: string; waves: { radiusKm: number }[]; polygon: { coordinates: number[][][] } }[]).find((z) => z.id === zonaId);
     assert(Boolean(creada), 'aparece en la lista de zonas al instante, sin reiniciar');
     assert(creada?.polygon.coordinates[0]?.length === 65, `como círculo de 64 lados (${creada?.polygon.coordinates[0]?.length} puntos)`);
-    assert(creada?.waves[0]?.radiusKm === 5, `con las oleadas de vereda (${creada?.waves[0]?.radiusKm} km la primera)`);
 
     const repetida = await llamar('/v1/admin/zones', {
       method: 'POST',
@@ -96,30 +95,44 @@ async function main() {
     });
     assert(repetida.status === 409 && repetida.body.code === 'NAME_TAKEN', `el mismo nombre otra vez se rechaza (${repetida.body.code})`);
 
-    const mal = await llamar(`/v1/admin/zones/${zonaId}`, {
+    /*
+     * Los ajustes del despacho: una sola regla para toda la ciudad
+     * (26/11/2026). Antes cada zona tenía sus oleadas.
+     */
+    const antes = await llamar('/v1/admin/dispatch', { panel: true });
+    assert(antes.status === 200 && Array.isArray(antes.body.rondas) && antes.body.rondas.length === 3, `los ajustes del despacho se leen (${antes.status})`, antes.body);
+    const mal = await llamar('/v1/admin/dispatch', {
       method: 'PATCH',
       panel: true,
       body: {
-        waves: [
-          { wave: 1, radiusKm: 8, candidates: 3, timeoutSeconds: 70 },
-          { wave: 2, radiusKm: 4, candidates: 6, timeoutSeconds: 90 },
-          { wave: 3, radiusKm: 20, candidates: 14, timeoutSeconds: 120 },
+        rondas: [
+          { wave: 1, radiusKm: 2, candidates: 200, timeoutSeconds: 25 },
+          { wave: 2, radiusKm: 1, candidates: 200, timeoutSeconds: 30 },
+          { wave: 3, radiusKm: 3, candidates: 200, timeoutSeconds: 40 },
         ],
+        lejanos: { candidatos: 3, hastaKm: 40, margenKm: 1 },
+        posicionMaximaMin: 30,
       },
     });
-    assert(mal.status === 400, `oleadas que buscan más cerca que la anterior se rechazan (${mal.status})`);
-    const bien = await llamar(`/v1/admin/zones/${zonaId}`, {
+    assert(mal.status === 400, `rondas que buscan más cerca que la anterior se rechazan (${mal.status})`);
+    const bien = await llamar('/v1/admin/dispatch', {
       method: 'PATCH',
       panel: true,
       body: {
-        waves: [
-          { wave: 1, radiusKm: 4, candidates: 3, timeoutSeconds: 70 },
-          { wave: 2, radiusKm: 9, candidates: 6, timeoutSeconds: 90 },
-          { wave: 3, radiusKm: 20, candidates: 14, timeoutSeconds: 120 },
+        rondas: [
+          { wave: 1, radiusKm: 0.5, candidates: 200, timeoutSeconds: 20 },
+          { wave: 2, radiusKm: 1.5, candidates: 200, timeoutSeconds: 30 },
+          { wave: 3, radiusKm: 3, candidates: 200, timeoutSeconds: 40 },
         ],
+        lejanos: { candidatos: 2, hastaKm: 25, margenKm: 2 },
+        posicionMaximaMin: 45,
       },
     });
-    assert(bien.status === 200 && bien.body.waves?.[0]?.radiusKm === 4, `cambiar las oleadas guarda de verdad (${bien.status})`, bien.body);
+    assert(bien.status === 200 && bien.body.rondas?.[0]?.radiusKm === 0.5 && bien.body.lejanos?.candidatos === 2, `cambiar los ajustes guarda de verdad (${bien.status})`, bien.body);
+    const leidos = await llamar('/v1/admin/dispatch', { panel: true });
+    assert(leidos.body.rondas?.[0]?.timeoutSeconds === 20 && leidos.body.lejanos?.hastaKm === 25, 'y se leen de vuelta');
+    const restaurados = await llamar('/v1/admin/dispatch', { method: 'PATCH', panel: true, body: antes.body });
+    assert(restaurados.status === 200, 'se dejan como estaban');
 
     console.log('\n2. Lugares');
     const lugar = await llamar('/v1/admin/places', {
@@ -182,11 +195,11 @@ async function main() {
     if (lugares.length) await db.query('delete from places where id = any($1::uuid[])', [lugares]);
     if (zonaId) {
       await db.query('delete from zones where id = $1', [zonaId]);
-      // La API tiene las zonas en memoria: guardar las oleadas de otra zona
+      // La API tiene las zonas en memoria: guardar los ajustes del despacho
       // tal como están las vuelve a cargar, ya sin la de prueba.
-      const centro = await db.query(`select id, waves from zones where name = 'Centro'`);
-      if (centro.rows[0]) {
-        await llamar(`/v1/admin/zones/${centro.rows[0].id}`, { method: 'PATCH', panel: true, body: { waves: centro.rows[0].waves } });
+      const ajustes = await llamar('/v1/admin/dispatch', { panel: true });
+      if (ajustes.status === 200) {
+        await llamar('/v1/admin/dispatch', { method: 'PATCH', panel: true, body: ajustes.body });
       }
     }
     await db.query('delete from sessions where user_id = $1', [USUARIO]);

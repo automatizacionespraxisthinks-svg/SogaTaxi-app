@@ -5,6 +5,7 @@ import {
   doublePrecision,
   index,
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -71,6 +72,11 @@ export const drivers = pgTable(
      * código no se vuelve a asignar. No aparece en Flota ni puede entrar.
      */
     eliminadoAt: timestamp('eliminado_at', { withTimezone: true }),
+    /**
+     * Los campos adicionales que definió la oficina (`campos_extra`), por id
+     * del campo. Texto tal como se escribió; el tipo lo da el campo.
+     */
+    extra: jsonb('extra').$type<Record<string, string>>().notNull().default({}),
     /** Intentos fallidos seguidos; a los 5 se bloquea el acceso (§8.1). */
     failedAttempts: integer('failed_attempts').notNull().default(0),
     lockedUntil: timestamp('locked_until', { withTimezone: true }),
@@ -104,6 +110,15 @@ export const vehicles = pgTable(
     chassisNumber: text('chassis_number'),
     weightKg: integer('weight_kg'),
     registeredOn: date('registered_on', { mode: 'string' }),
+    /**
+     * Vencimientos del carro (26/11/2026): el SOAT y la revisión
+     * técnico-mecánica. Vienen de la carga desde Autocab y los mantiene la
+     * oficina; el panel avisa antes de que venzan.
+     */
+    soatExpiresOn: date('soat_expires_on', { mode: 'string' }),
+    rtoExpiresOn: date('rto_expires_on', { mode: 'string' }),
+    /** Los campos adicionales que definió la oficina, por id del campo. */
+    extra: jsonb('extra').$type<Record<string, string>>().notNull().default({}),
     /** El propietario: a quién se llama por el taxi. La cédula va cifrada (§8.2). */
     ownerName: text('owner_name'),
     ownerDocumentEncrypted: text('owner_document_encrypted'),
@@ -125,6 +140,29 @@ export const vehicles = pgTable(
  * hace falta. Esto es lo que la oficina consulta para saber de quién es cada
  * móvil.
  */
+/**
+ * Campos adicionales de conductores y vehículos (26/11/2026).
+ *
+ * La oficina puede necesitar guardar un dato que el sistema no trae —la
+ * empresa afiliadora, el número de la tarjeta de operación—. En vez de pedir
+ * un cambio de programa por cada uno, los define aquí y aparecen en la ficha.
+ * El valor de cada conductor o vehículo vive en su columna `extra`.
+ *
+ * No se borran: se desactivan, y lo ya escrito se conserva por si vuelve.
+ */
+export const camposExtra = pgTable(
+  'campos_extra',
+  {
+    id: uuid('id').primaryKey(),
+    entidad: text('entidad').$type<'conductor' | 'vehiculo'>().notNull(),
+    nombre: text('nombre').notNull(),
+    tipo: text('tipo').$type<'texto' | 'numero' | 'fecha'>().notNull().default('texto'),
+    activo: boolean('activo').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('campos_extra_nombre_key').on(table.entidad, table.nombre)],
+);
+
 export const vehicleDrivers = pgTable(
   'vehicle_drivers',
   {

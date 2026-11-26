@@ -11,8 +11,12 @@ import { nucleoDe, nuevoLugarSchema } from '@tax/shared';
  *  - nombre de 3 a 80 caracteres, hasta 20 palabras clave de 3 a 60;
  *  - ningún nombre ni palabra clave en dos lugares a la vez, contando los que
  *    ya están en la base;
- *  - el lugar tiene que caer dentro de una zona activa, y toma de ella el
- *    tipo y la zona. Las zonas las mira el script en la base donde se
+ *  - el lugar entra en la zona que lo contiene o, si no cae en ninguna, en
+ *    la más cercana que lo tenga a su alcance (1 km un barrio, 3 km una
+ *    vereda: la misma regla de `zonaMasCercana`), y toma de ella el tipo. Si
+ *    no hay ninguna, se carga sin zona: las zonas son para las estadísticas.
+ *    El script no comprueba que el punto sea de Sogamoso (el panel sí): lo
+ *    que se le da ya viene revisado. Las zonas las mira el script en la base donde se
  *    ejecuta, no aquí: las de producción no son las de este equipo.
  *
  * Lo que no cumple, no se carga y lo dice al final. Se puede ejecutar otra
@@ -103,8 +107,9 @@ function main(): void {
 --      ROLLBACK. Si el resultado cuadra, vuelve a poner COMMIT y ejecútalo.
 --
 -- Cada lugar entra en la zona donde cae, con el tipo de esa zona. Si no cae en
--- ninguna zona activa, NO se carga: el panel tampoco lo deja, porque allí no se
--- despacha. Crea la zona que falte y vuelve a ejecutar el script.
+-- ninguna, entra en la más cercana que lo tenga a su alcance (1 km un barrio,
+-- 3 km una vereda), igual que el panel. Si queda lejos de todas, se carga SIN
+-- zona: el despacho es por cercanía y no la necesita.
 --
 -- Se puede ejecutar otra vez: un lugar con el mismo nombre se actualiza en vez
 -- de duplicarse. Si una palabra clave ya es de otro lugar de la base, ese lugar
@@ -138,6 +143,29 @@ create function pg_temp.en_zona(lat float8, lng float8, poligono jsonb) returns 
     ) aristas
 $$;
 
+-- Distancia en km entre dos puntos (haversine), como haversineKm() de la app.
+create function pg_temp.km(lat1 float8, lng1 float8, lat2 float8, lng2 float8) returns float8 language sql immutable as $$
+  select 2 * 6371 * asin(sqrt(
+    power(sin(radians(lat2 - lat1) / 2), 2) +
+    cos(radians(lat1)) * cos(radians(lat2)) * power(sin(radians(lng2 - lng1) / 2), 2)))
+$$;
+
+-- Centro y radio de cada zona activa, leídos de su polígono como hace
+-- centroYRadioDe() en la app: el centro del rectángulo que la envuelve y el
+-- vértice más lejano.
+create temp table carga_zonas on commit drop as
+  with caja as (
+    select z.id, z.name, z.kind, z.polygon,
+           (min((v->>1)::float8) + max((v->>1)::float8)) / 2 as clat,
+           (min((v->>0)::float8) + max((v->>0)::float8)) / 2 as clng
+      from zones z, jsonb_array_elements(z.polygon->'coordinates'->0) v
+     where z.active
+     group by z.id, z.name, z.kind, z.polygon
+  )
+  select c.*, (select max(pg_temp.km(c.clat, c.clng, (v->>1)::float8, (v->>0)::float8))
+                 from jsonb_array_elements(c.polygon->'coordinates'->0) v) as radio
+    from caja c;
+
 create temp table carga_lugares (orden int, nombre text, aliases jsonb, lat float8, lng float8) on commit drop;
 insert into carga_lugares values
 ${filas};
@@ -148,19 +176,29 @@ do $$
 declare
   r record;
   zona record;
+  v_zona uuid;
+  v_nombre text;
+  v_tipo zone_kind;
   existente uuid;
   choque text;
 begin
   for r in select * from carga_lugares order by orden loop
+    -- La que lo contiene (si dos vecinas se pisan, la del centro más cercano)
+    -- o la más cercana hasta su borde, dentro de su alcance.
     select z.id, z.name, z.kind into zona
-      from zones z
-     where z.active and pg_temp.en_zona(r.lat, r.lng, z.polygon)
-     order by z.created_at
+      from (
+        select cz.*, pg_temp.en_zona(r.lat, r.lng, cz.polygon) as dentro,
+               pg_temp.km(r.lat, r.lng, cz.clat, cz.clng) as al_centro
+          from carga_zonas cz
+      ) z
+     where z.dentro or greatest(0, z.al_centro - z.radio) <= case when z.kind::text = 'rural' then 3 else 1 end
+     order by z.dentro desc,
+              case when z.dentro then z.al_centro else greatest(0, z.al_centro - z.radio) end
      limit 1;
-    if not found then
-      insert into carga_informe values (r.orden, r.nombre, 'Fuera de zona', null,
-        'No cae en ninguna zona activa: allí no se despacha. No se carga.');
-      continue;
+    if found then
+      v_zona := zona.id; v_nombre := zona.name; v_tipo := zona.kind;
+    else
+      v_zona := null; v_nombre := 'Sin zona'; v_tipo := 'rural';
     end if;
 
     select p.id into existente
@@ -180,20 +218,20 @@ begin
        )
      limit 1;
     if choque is not null then
-      insert into carga_informe values (r.orden, r.nombre, 'Choca', zona.name,
+      insert into carga_informe values (r.orden, r.nombre, 'Choca', v_nombre,
         format('Comparte nombre o palabra clave con «%s». No se carga.', choque));
       continue;
     end if;
 
     if existente is null then
       insert into places (id, name, kind, zone_id, lat, lng, aliases)
-      values (gen_random_uuid(), r.nombre, zona.kind, zona.id, r.lat, r.lng, r.aliases);
-      insert into carga_informe values (r.orden, r.nombre, 'Nuevo', zona.name, null);
+      values (gen_random_uuid(), r.nombre, v_tipo, v_zona, r.lat, r.lng, r.aliases);
+      insert into carga_informe values (r.orden, r.nombre, 'Nuevo', v_nombre, null);
     else
       update places
-         set lat = r.lat, lng = r.lng, aliases = r.aliases, zone_id = zona.id, kind = zona.kind, active = true
+         set lat = r.lat, lng = r.lng, aliases = r.aliases, zone_id = v_zona, kind = v_tipo, active = true
        where id = existente;
-      insert into carga_informe values (r.orden, r.nombre, 'Actualizado', zona.name, null);
+      insert into carga_informe values (r.orden, r.nombre, 'Actualizado', v_nombre, null);
     end if;
   end loop;
 end $$;
@@ -207,7 +245,7 @@ select resultado as "Resultado", count(*) as "Lugares" from carga_informe group 
 select orden as "#", lugar as "Lugar", resultado as "Resultado", coalesce(zona, '—') as "Zona",
        coalesce(detalle, '') as "Detalle"
   from carga_informe
- order by case resultado when 'Fuera de zona' then 0 when 'Choca' then 1 else 2 end, orden;
+ order by case resultado when 'Choca' then 0 else 1 end, orden;
 
 -- 3. El catálogo como queda, por zona
 select coalesce(z.name, 'Sin zona') as "Zona", count(*) as "Lugares activos"

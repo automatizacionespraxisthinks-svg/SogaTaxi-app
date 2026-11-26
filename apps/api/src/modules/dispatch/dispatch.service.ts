@@ -17,7 +17,7 @@ import { PushService, type EstadoAviso } from '../push/push.service';
 import { loadEnv } from '../../config/env';
 import { REDIS, redisKeys } from '../../redis/redis.module';
 import type { Redis } from 'ioredis';
-import { OLEADA_A_TODOS, finDeSuspension, sigueSuspendido, type Oleada, type WaveLogEntry } from '@tax/shared';
+import { OLEADA_A_TODOS, TODOS_EN_EL_RANGO, finDeSuspension, sigueSuspendido, type Oleada, type WaveLogEntry } from '@tax/shared';
 
 export const DISPATCH_QUEUE = 'dispatch';
 export const WAVE_TIMEOUT_JOB = 'wave-timeout';
@@ -131,8 +131,8 @@ export class DispatchService {
       return;
     }
 
-    // La zona no hace falta: un punto de Paipa sin polígono se despacha con
-    // las oleadas por defecto (ver `ZonesService.waveConfig`).
+    // La zona no hace falta: el despacho es por cercanía, con los mismos
+    // ajustes para toda la ciudad (ver `ZonesService.ajustesDespacho`).
     if (!ride.pickupLat || !ride.pickupLng) {
       throw new AppError('MISSING_LOCATION', 'La carrera no tiene punto de recogida');
     }
@@ -154,13 +154,17 @@ export class DispatchService {
     }
 
     const pickup = { lat: ride.pickupLat, lng: ride.pickupLng };
-    const aTodos = wave === OLEADA_A_TODOS;
-    // La ronda a todos usa el tiempo de la tercera: no tiene configuracion
-    // propia por zona porque es una herramienta de prueba, no una oleada mas.
-    const config = this.zones.waveConfig(ride.zoneId, aTodos ? 3 : wave);
+    // La cuarta ronda es «los más cercanos que haya»: no había nadie dentro
+    // del tope. Ver `Oleada` en @tax/shared.
+    const masCercanos = wave === OLEADA_A_TODOS;
+    const ajustes = this.zones.ajustesDespacho();
+    // La cuarta usa el tiempo de la tercera: no tiene configuración propia.
+    const config = this.zones.waveConfig(masCercanos ? 3 : wave);
+    // Tope de seguridad para todas las rondas: de quien lleva más que esto
+    // sin reportar posición no se sabe dónde está.
+    const topeDePosicionSeg = ajustes.posicionMaximaMin * 60;
 
     let candidates;
-    let sinGps: number | undefined;
 
     /*
      * Los nuevos de esta oleada son quienes todavía no la recibieron en este
@@ -186,10 +190,33 @@ export class DispatchService {
       .where(eq(rideDriverCancellations.rideId, rideId));
     const excluidos = [...alreadyOffered, ...laSoltaron].map((row) => row.driverId);
 
-    if (aTodos) {
-      const todos = await this.fleet.findAllAvailable(pickup, excluidos, ride.pagoElectronico);
-      candidates = todos.candidates;
-      sinGps = todos.sinGps;
+    if (masCercanos) {
+      /*
+       * Sin tope de ronda, pero no a cualquiera (26/11/2026):
+       *
+       *  - solo a los que están a una distancia parecida a la del más
+       *    cercano —hasta `margenKm` más lejos que él—: con los tres más
+       *    cercanos a 3, 4 y 12 km, el de 12 podía aceptar primero y cruzar
+       *    la ciudad;
+       *  - y en cada reintento el margen y el cupo crecen. Antes, si los
+       *    tres más cercanos no contestaban, cada reintento volvía a avisar
+       *    a los mismos tres y el cuarto nunca se enteraba.
+       */
+      const vuelta = (ride.waveLog ?? []).filter((e) => e.wave === OLEADA_A_TODOS).length + 1;
+      const disponibles = await this.fleet.findCandidates(
+        pickup,
+        ajustes.lejanos.hastaKm,
+        ride.vehicleType,
+        TODOS_EN_EL_RANGO,
+        excluidos,
+        ride.pagoElectronico,
+        topeDePosicionSeg,
+      );
+      const porDistancia = [...disponibles].sort((a, b) => a.distanceKm - b.distanceKm);
+      const tope = (porDistancia[0]?.distanceKm ?? 0) + ajustes.lejanos.margenKm * vuelta;
+      candidates = porDistancia
+        .filter((c) => c.distanceKm <= tope)
+        .slice(0, ajustes.lejanos.candidatos * vuelta);
     } else {
       candidates = await this.fleet.findCandidates(
         pickup,
@@ -197,9 +224,12 @@ export class DispatchService {
         ride.vehicleType,
         config.candidates,
         excluidos,
-        // Coexiste con las zonas: el radio y el tiempo de cada oleada son los
-        // de siempre, solo que entre los que reciben pagos electrónicos.
+        // Solo entre los que reciben pagos electrónicos, si así se pidió.
         ride.pagoElectronico,
+        // La ronda 1 es para quien está de verdad a pocas cuadras: quien
+        // lleva demasiado sin reportar posición entra desde la 2. En las
+        // demás vale el tope de seguridad.
+        wave === 1 ? Math.min(this.env.POSITION_OLEADA1_MAX_AGE_SECONDS, topeDePosicionSeg) : topeDePosicionSeg,
       );
     }
 
@@ -241,9 +271,9 @@ export class DispatchService {
         intento,
         startedAt: new Date().toISOString(),
         expiresAt: null,
-        radiusKm: aTodos ? null : config.radiusKm,
+        radiusKm: masCercanos ? null : config.radiusKm,
         candidates: 0,
-        ...(sinGps !== undefined ? { sinGps } : {}),
+        ...(masCercanos ? { masCercanos: true } : {}),
       });
       // Directo, sin el cerrojo de `escalate`: o es la oleada 1 de un
       // intento nuevo, o ya se está dentro del paso que lo tomó.
@@ -359,10 +389,10 @@ export class DispatchService {
       intento,
       startedAt: new Date().toISOString(),
       expiresAt: expiresAt.toISOString(),
-      radiusKm: aTodos ? null : config.radiusKm,
+      radiusKm: masCercanos ? null : config.radiusKm,
       candidates: candidates.length,
+      ...(masCercanos ? { masCercanos: true } : {}),
       ...(wave === 1 ? {} : { arrastrados: vivas.length }),
-      ...(sinGps !== undefined ? { sinGps } : {}),
     });
 
     const zoneName = ride.zoneId ? this.zones.byId(ride.zoneId)?.name : undefined;
@@ -743,14 +773,22 @@ export class DispatchService {
     }
 
     /*
-     * Tras la tercera, la ronda final a todos los conductores disponibles,
-     * sin mirar distancia, con los de las tres oleadas todavía dentro. La
-     * empresa la quiere siempre (3/11/2026); `OLEADA_FINAL_A_TODOS=false`
-     * la apaga.
+     * Los más cercanos que haya (26/11/2026). Si en las tres rondas de este
+     * intento no hubo a quién avisar —no hay ningún taxi dentro del tope—,
+     * el más cercano disponible sigue siendo el más cercano aunque esté a
+     * 6 km: es el caso de una vereda. Si sí hubo a quién avisar y nadie
+     * aceptó, no se abre: la carrera se relanza cerca.
      */
-    if (wave === 3 && this.env.OLEADA_FINAL_A_TODOS) {
-      await this.startWave(rideId, OLEADA_A_TODOS);
-      return;
+    if (wave === 3 && this.zones.ajustesDespacho().lejanos.candidatos > 0) {
+      const actual = await this.ridesService.byId(rideId);
+      const [avisados] = await this.db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(rideOffers)
+        .where(and(eq(rideOffers.rideId, rideId), eq(rideOffers.intento, actual.intentoDespacho)));
+      if ((avisados?.n ?? 0) === 0) {
+        await this.startWave(rideId, OLEADA_A_TODOS);
+        return;
+      }
     }
 
     // Agotadas las oleadas: estado Sin asignar, evento y alerta sonora en el

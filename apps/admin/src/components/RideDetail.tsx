@@ -657,7 +657,13 @@ function OleadaFila({
   seAceptoAqui: boolean;
 }) {
   const aTodos = entrada.wave === OLEADA_A_TODOS;
-  const titulo = aTodos ? 'Todos los disponibles' : `Oleada ${entrada.wave}`;
+  // La cuarta ronda es «a todos» (prueba) o «los más cercanos que haya»
+  // cuando no había ningún taxi dentro del tope.
+  const titulo = aTodos
+    ? entrada.masCercanos
+      ? 'Los más cercanos que había'
+      : 'Todos los disponibles'
+    : `Ronda ${entrada.wave}`;
   const alcance =
     entrada.radiusKm === null ? 'sin límite de distancia' : `hasta ${formatDistance(entrada.radiusKm)}`;
 
@@ -804,7 +810,7 @@ function OleadasSinRegistro({ ride }: { ride: Ride }) {
     <div className="space-y-4">
       {waves.map((wave) => (
         <div key={wave}>
-          <SectionLabel>{wave === OLEADA_A_TODOS ? 'Todos los disponibles' : `Oleada ${wave}`}</SectionLabel>
+          <SectionLabel>{wave === OLEADA_A_TODOS ? 'Ronda final' : `Ronda ${wave}`}</SectionLabel>
           <ul className="mt-2 space-y-1.5">
             {ride.offers
               .filter((o) => o.wave === wave)

@@ -105,6 +105,8 @@ export interface ApiDriver {
   motivoSuspension?: string | null;
   licenseExpiresOn?: string | null;
   licenseRestriction?: string | null;
+  tieneCedula?: boolean;
+  extra?: Record<string, string>;
   moviles?: {
     vehicleId?: string;
     origen?: 'listado' | 'panel';
@@ -242,6 +244,8 @@ export function toDriver(row: ApiDriver): Driver {
     motivoSuspension: row.motivoSuspension ?? undefined,
     licenciaVence: row.licenseExpiresOn ?? undefined,
     licenciaRestriccion: row.licenseRestriction ?? undefined,
+    tieneCedula: row.tieneCedula ?? false,
+    extra: row.extra ?? {},
     moviles: (row.moviles ?? []).map((m) => ({
       vehiculoId: m.vehicleId,
       origen: m.origen,
