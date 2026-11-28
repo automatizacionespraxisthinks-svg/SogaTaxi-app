@@ -1,3 +1,4 @@
+import { LETRA_DE_AUTOCAB, capacidadesValidas, type Capacidad } from '@tax/shared';
 /**
  * Los dos archivos que exporta Autocab, el sistema anterior de la empresa:
  * `Vehiculos.csv` y `Conductores.csv` (26/11/2026).
@@ -44,6 +45,12 @@ export interface PersonaDeAutocab {
   /** Suspendido en todas sus unidades de Autocab: se carga desactivado. */
   suspendido: boolean;
   carros: { placa: string; rol: 'conductor' | 'relevador' }[];
+  /**
+   * Los medios de pago que recibe y los servicios que presta: las letras de
+   * «Capacidades» que el sistema conoce (N, D, K, M, L, C), de todas sus
+   * unidades juntas.
+   */
+  capacidades: Capacidad[];
   /** Cuántas filas de Autocab eran esta persona. */
   filas: number;
 }
@@ -237,6 +244,7 @@ export function leerAutocab(csvVehiculos: string, csvConductores: string): Autoc
     pin: string | null;
     suspendido: boolean;
     placa: string | null;
+    capacidades: Capacidad[];
   }
   const filas: Fila[] = leerCsv(csvConductores).map((f) => {
     const nombre = nombreLimpio(`${col(f, 'Nombres')} ${col(f, 'Apellidos')}`);
@@ -252,6 +260,10 @@ export function leerAutocab(csvVehiculos: string, csvConductores: string): Autoc
       pin: /^\d{4}$/.test(col(f, 'PIN')) ? col(f, 'PIN') : null,
       suspendido: col(f, 'Estado de suspensi').toLowerCase() === 'true',
       placa: placaLimpia(col(f, 'Número de referencia')),
+      // «MFELRND»: una letra por capacidad. Las que no son nuestras se saltan.
+      capacidades: capacidadesValidas(
+        [...col(f, 'Capacidades').toUpperCase()].map((letra) => LETRA_DE_AUTOCAB[letra]).filter((c) => c !== undefined),
+      ),
     };
   });
 
@@ -296,6 +308,7 @@ export function leerAutocab(csvVehiculos: string, csvConductores: string): Autoc
       if (rol === 'conductor' || !carrosDeLaPersona.has(f.placa)) carrosDeLaPersona.set(f.placa, rol);
     }
     personas.push({
+      capacidades: capacidadesValidas(grupo.flatMap((f) => f.capacidades)),
       nombre: principal.nombre,
       cedula: identidad.startsWith('c:') ? identidad.slice(2) : null,
       celular: orden.find((f) => f.celular)?.celular ?? null,

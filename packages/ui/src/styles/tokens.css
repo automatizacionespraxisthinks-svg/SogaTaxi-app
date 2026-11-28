@@ -63,12 +63,14 @@
 
   --map-land: #E6EDE0;
   --map-water: #9CC8EA;
+  --map-en-carrera: #1F5FD1;  /* taxi en carrera en el mapa: azul, no se confunde con verde ni naranja */
 
   /* Puntos de estado sobre tinta: leyenda del mapa */
   --legend-success: #3FC57A;
   --legend-brand: #FBD31A;
   --legend-warning: #FFA94D;
   --legend-danger: #FF6A45;
+  --legend-ride: #7FB0FF;     /* el azul de «En carrera», aclarado para leerse sobre tinta */
 
   --plate: #FFD43B;           /* placa del vehículo, con borde tinta */
 
@@ -239,6 +241,7 @@
   --color-legend-brand: var(--legend-brand);
   --color-legend-warning: var(--legend-warning);
   --color-legend-danger: var(--legend-danger);
+  --color-legend-ride: var(--legend-ride);
   --color-plate: var(--plate);
 
   --color-tone-ink: var(--tone-ink);

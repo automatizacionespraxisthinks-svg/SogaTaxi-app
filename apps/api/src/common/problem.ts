@@ -73,6 +73,8 @@ export const ERROR_CODES = {
   DRIVER_OFF_SHIFT: 'El conductor no tiene un turno abierto',
   /* La PWA ramifica por este: muestra hasta cuándo, no «PIN incorrecto». */
   DRIVER_SUSPENDED: 'El conductor está suspendido',
+  /* Licencia, SOAT o técnico-mecánica vencidos, con el bloqueo activado. */
+  DOCUMENTS_EXPIRED: 'Hay documentos vencidos',
   DRIVER_NO_ELECTRONIC_PAYMENT: 'El conductor no recibe pagos electrónicos',
   /* El móvil no está entre los que la oficina le permite manejar. */
   VEHICLE_NOT_ALLOWED: 'Ese vehículo no está entre tus vehículos permitidos',
@@ -125,6 +127,7 @@ const STATUS_BY_CODE: Record<ErrorCode, HttpStatus> = {
   DRIVER_BUSY: HttpStatus.CONFLICT,
   DRIVER_OFF_SHIFT: HttpStatus.CONFLICT,
   DRIVER_SUSPENDED: HttpStatus.FORBIDDEN,
+  DOCUMENTS_EXPIRED: HttpStatus.FORBIDDEN,
   DRIVER_NO_ELECTRONIC_PAYMENT: HttpStatus.CONFLICT,
   VEHICLE_NOT_ALLOWED: HttpStatus.FORBIDDEN,
   RIDE_TOO_SHORT: HttpStatus.CONFLICT,

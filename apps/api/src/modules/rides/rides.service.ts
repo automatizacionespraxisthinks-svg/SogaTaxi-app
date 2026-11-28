@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
-import type { CreateRideInput, Point, RideStatus, TransitionActor } from '@tax/shared';
+import type { CreateRideInput, MedioDePago, Point, RideStatus, TransitionActor } from '@tax/shared';
 import {
   MAX_CARRERAS_ACTIVAS,
   OPEN_RIDE_STATUSES,
@@ -188,6 +188,8 @@ export class RidesService {
         'El nombre de WhatsApp no sirve para identificar al cliente: pregúntale a nombre de quién va el taxi y vuelve a pedirlo con ese nombre',
       );
     }
+    // El medio exacto si vino; si no, lo que diga la marca de antes.
+    const medioPago: MedioDePago = input.medioPago ?? (input.pagoElectronico ? 'electronico' : 'efectivo');
     let pickupSource: 'compartida' | 'catalogo' | 'geocodificada' | 'sin_ubicar' = 'compartida';
     let direccionResuelta: string | undefined;
     let pickupText = input.pickup.text;
@@ -379,7 +381,13 @@ export class RidesService {
                * chocando contra el índice y recibe «ya tiene taxi pedido».
                */
               allowsConcurrent: numero > 1,
-              pagoElectronico: input.pagoElectronico,
+              pagoElectronico: medioPago !== 'efectivo',
+              medioPago,
+              servicio: input.servicio ?? null,
+              // Solo las de la oficina: las de WhatsApp no las creó una persona.
+              // Una integración que actúa como operador trae el id de su clave,
+              // no el de un usuario.
+              createdBy: actor.kind === 'operator' && actor.role !== 'integración' ? (actor.id ?? null) : null,
               etaMinutes: trayecto.etaMinutes,
               notes: notasDe(numero),
             })
@@ -405,7 +413,9 @@ export class RidesService {
                 code,
                 pickup: { ...input.pickup, text: pickupText, point },
                 pickupSource,
-                pagoElectronico: input.pagoElectronico,
+                pagoElectronico: medioPago !== 'efectivo',
+                medioPago,
+                servicio: input.servicio ?? null,
                 // Para que el agente pueda confirmarle al cliente lo que se
                 // entendio, sin tener que geocodificar el por su cuenta.
                 direccionResuelta,
@@ -834,6 +844,69 @@ export class RidesService {
     return { ...RidesService.flatten(row), driver: driver ?? null, history, offers };
   }
 
+  /* ------------------------------------------- ayudas de «Nueva carrera» */
+
+  /**
+   * Dónde queda una dirección con nomenclatura, para pintarla en el mapa
+   * mientras la operadora todavía la escribe (27/11/2026). Es la misma
+   * consulta que hará la creación, y queda en la caché: no se le paga dos
+   * veces a Google. Los lugares del catálogo no pasan por aquí —el panel ya
+   * los tiene, y `reconocer()` les cuenta un uso que aún no ocurrió—.
+   */
+  async ubicarParaLaOficina(texto: string): Promise<{ point: Point; direccion: string } | null> {
+    if (!tieneNomenclatura(texto)) return null;
+    const { resuelta } = await this.geocoding.resolverConMotivo(texto);
+    return resuelta ? { point: resuelta.point, direccion: resuelta.formatted } : null;
+  }
+
+  /**
+   * El cliente que llama, por su celular: el nombre con el que quedó y sus
+   * últimas recogidas, para no volver a digitar lo que ya se sabe. Solo lo
+   * que la oficina ya ve en «Carreras»; de un titular suprimido, nada.
+   */
+  async clienteParaLaOficina(telefono: string): Promise<{
+    nombre: string | null;
+    recogidas: { texto: string; referencia: string | null; punto: Point | null; veces: number }[];
+  } | null> {
+    const [cliente] = await this.db
+      .select({ id: customers.id, name: customers.name })
+      .from(customers)
+      .where(and(eq(customers.phone, telefono), isNull(customers.suprimidoAt)))
+      .limit(1);
+    if (!cliente) return null;
+
+    const ultimas = await this.db
+      .select({
+        texto: rides.pickupText,
+        referencia: rides.pickupReference,
+        lat: rides.pickupLat,
+        lng: rides.pickupLng,
+        origen: rides.pickupSource,
+      })
+      .from(rides)
+      .where(eq(rides.customerId, cliente.id))
+      .orderBy(desc(rides.createdAt))
+      .limit(40);
+
+    // La misma dirección escrita dos veces es una sola sugerencia.
+    const porTexto = new Map<string, { texto: string; referencia: string | null; punto: Point | null; veces: number }>();
+    for (const r of ultimas) {
+      const clave = normalizarParaBuscar(r.texto);
+      const vista = porTexto.get(clave);
+      if (vista) {
+        vista.veces += 1;
+        continue;
+      }
+      porTexto.set(clave, {
+        texto: r.texto,
+        referencia: r.referencia,
+        punto: r.origen !== 'sin_ubicar' && r.lat !== null && r.lng !== null ? { lat: r.lat, lng: r.lng } : null,
+        veces: 1,
+      });
+    }
+    return { nombre: cliente.name, recogidas: [...porTexto.values()].slice(0, 4) };
+  }
+
   async list(status?: RideStatus[], limit = 100) {
     const query = this.withCustomer().orderBy(desc(rides.createdAt)).limit(limit);
     const rows = await (status?.length ? query.where(inArray(rides.status, status)) : query);
@@ -1005,8 +1078,16 @@ export class RidesService {
    * conductor, cambiarlo dejaría la carrera en manos de alguien que no se
    * eligió con esta regla.
    */
-  async cambiarMedioDePago(rideId: string, pagoElectronico: boolean, actor: Actor) {
+  async cambiarMedioDePago(rideId: string, pedido: MedioDePago, actor: Actor) {
     const ride = await this.byId(rideId);
+    /*
+     * Un cliente sin actualizar solo sabe decir «pago electrónico». Si la
+     * carrera ya tiene su medio exacto (Nequi), eso no lo cambia: volverlo
+     * genérico se la ofrecería a quien solo recibe Daviplata.
+     */
+    const medioPago: MedioDePago =
+      pedido === 'electronico' && ride.medioPago !== 'efectivo' ? ride.medioPago : pedido;
+    const pagoElectronico = medioPago !== 'efectivo';
 
     if (ride.status !== 'UNASSIGNED') {
       throw new AppError(
@@ -1014,12 +1095,12 @@ export class RidesService {
         `El medio de pago solo se cambia con la carrera sin asignar; esta está en ${ride.status}`,
       );
     }
-    if (ride.pagoElectronico === pagoElectronico) return ride;
+    if (ride.medioPago === medioPago) return ride;
 
     const updated = await this.db.transaction(async (tx) => {
       const [next] = await tx
         .update(rides)
-        .set({ pagoElectronico, version: ride.version + 1, updatedAt: new Date() })
+        .set({ pagoElectronico, medioPago, version: ride.version + 1, updatedAt: new Date() })
         .where(eq(rides.id, rideId))
         .returning();
 
@@ -1031,8 +1112,8 @@ export class RidesService {
           action: 'Cambió el medio de pago',
           entity: 'rides',
           entityId: ride.code,
-          before: { pagoElectronico: ride.pagoElectronico },
-          after: { pagoElectronico },
+          before: { medioPago: ride.medioPago },
+          after: { medioPago },
           ip: actor.ip,
         },
         tx as unknown as Database,

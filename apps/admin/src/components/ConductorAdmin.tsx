@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'motion/react';
 import { Ban, Car, Check, Copy, CreditCard, KeyRound, Smartphone, Trash2, UserPlus } from 'lucide-react';
-import type { Driver } from '@tax/shared';
+import type { Capacidad, Driver } from '@tax/shared';
+import { CAPACIDAD_LABEL, MEDIOS_ELECTRONICOS, SERVICIOS } from '@tax/shared';
 import {
   DIAS_DE_SUSPENSION,
   MAX_DIAS_SUSPENSION,
@@ -96,11 +97,13 @@ interface NuevoConductor {
   code: string;
   name: string;
   phone: string;
+  /** Opcional al dar de alta; se puede completar después en «Editar datos». */
+  cedula: string;
   /** Los vehículos que podrá manejar: solo abrirá turno en estos. */
   vehicleIds: string[];
 }
 
-const VACIO: NuevoConductor = { code: '', name: '', phone: '+57', vehicleIds: [] };
+const VACIO: NuevoConductor = { code: '', name: '', phone: '+57', cedula: '', vehicleIds: [] };
 
 export function NuevoConductorBoton() {
   const [abierto, setAbierto] = useState(false);
@@ -112,8 +115,8 @@ export function NuevoConductorBoton() {
   const vehiculos = useVehiculos(abierto);
 
   const crear = useMutation({
-    mutationFn: (body: NuevoConductor) =>
-      api.post<{ code: string; pin: string }>('/v1/admin/drivers', body),
+    mutationFn: ({ cedula, ...body }: NuevoConductor) =>
+      api.post<{ code: string; pin: string }>('/v1/admin/drivers', { ...body, ...(cedula ? { cedula } : {}) }),
     onSuccess: async (respuesta) => {
       setCreado({ code: respuesta.code, pin: respuesta.pin });
       setError(undefined);
@@ -135,10 +138,12 @@ export function NuevoConductorBoton() {
     setError(undefined);
   };
 
+  const cedulaValida = datos.cedula === '' || /^\d{6,10}$/.test(datos.cedula);
   const listo =
     /^[0-9]{1,10}$/.test(datos.code) &&
     datos.name.trim().length >= 3 &&
     /^\+\d{8,15}$/.test(datos.phone) &&
+    cedulaValida &&
     datos.vehicleIds.length > 0;
 
   return (
@@ -193,6 +198,21 @@ export function NuevoConductorBoton() {
               />
             </Field>
 
+            <Field
+              label="Cédula"
+              htmlFor="cedula-nuevo"
+              hint={cedulaValida ? 'Solo números, sin puntos. Se puede completar después.' : 'Entre 6 y 10 dígitos, sin puntos'}
+            >
+              <Input
+                id="cedula-nuevo"
+                inputMode="numeric"
+                maxLength={10}
+                value={datos.cedula}
+                onChange={(e) => setDatos({ ...datos, cedula: e.target.value.replace(/\D/g, '') })}
+                className="font-mono"
+              />
+            </Field>
+
             {/* Solo podrá abrir turno o cambiar de carro dentro de estos
                 (18/11/2026). Un vehículo nuevo se da de alta antes en la
                 pestaña Vehículos de Flota. */}
@@ -231,6 +251,19 @@ export function NuevoConductorBoton() {
 }
 
 /* --------------------------------------------- gestión de un conductor --- */
+
+/**
+ * La cédula de un conductor. No viene con el listado de la flota: se pide
+ * aparte, al abrir la ficha, y solo si quien mira puede gestionar conductores.
+ */
+export function useCedula(driverId: string, activo = true) {
+  return useQuery({
+    queryKey: ['cedula', driverId],
+    queryFn: () => api.get<{ cedula: string | null }>(`/v1/admin/drivers/${driverId}/cedula`),
+    enabled: activo,
+    staleTime: 60_000,
+  });
+}
 
 interface Dispositivo {
   id: string;
@@ -436,6 +469,7 @@ export function GestionConductor({
   const toast = useToast();
   const qc = useQueryClient();
 
+  const cedula = useCedula(driver.id, gestionar);
   const dispositivos = useQuery({
     queryKey: ['dispositivos', driver.id],
     queryFn: () => api.get<Dispositivo[]>(`/v1/admin/drivers/${driver.id}/devices`),
@@ -478,20 +512,28 @@ export function GestionConductor({
     onError: () => toast.push({ tone: 'critical', title: 'No se pudo cambiar la marca de prueba' }),
   });
 
-  const cambiarPago = useMutation({
-    mutationFn: (acepta: boolean) =>
-      api.patch(`/v1/admin/drivers/${driver.id}`, { aceptaPagoElectronico: acepta }),
-    onSuccess: async (_r, acepta) => {
+  /*
+   * Medios de pago y servicios (27/11/2026): cada uno se prende o se apaga
+   * por separado y se guarda en el acto, mandando la lista completa.
+   */
+  const capacidades = driver.capacidades ?? [];
+  const cambiarCapacidad = useMutation({
+    mutationFn: (cual: Capacidad) =>
+      api.patch(`/v1/admin/drivers/${driver.id}`, {
+        capacidades: capacidades.includes(cual) ? capacidades.filter((c) => c !== cual) : [...capacidades, cual],
+      }),
+    onSuccess: async (_r, cual) => {
       await actions.refreshDrivers();
+      const tenia = capacidades.includes(cual);
       toast.push({
         tone: 'info',
-        title: acepta ? 'Recibe pagos electrónicos' : 'Ya no recibe pagos electrónicos',
-        description: acepta
-          ? 'Desde ahora también le llegan las carreras que se pagan así.'
-          : 'Las carreras con pago electrónico ya no se le ofrecen.',
+        title: `${CAPACIDAD_LABEL[cual]}: ${tenia ? 'se le quitó' : 'habilitado'}`,
+        description: tenia
+          ? 'Las carreras que lo exigen ya no se le ofrecen.'
+          : 'Desde ahora también le llegan las carreras que lo exigen.',
       });
     },
-    onError: () => toast.push({ tone: 'critical', title: 'No se pudo cambiar el medio de pago' }),
+    onError: () => toast.push({ tone: 'critical', title: 'No se pudo guardar el cambio' }),
   });
 
   const revocar = useMutation({
@@ -531,7 +573,18 @@ export function GestionConductor({
                 <p className="text-base text-ink">Datos del conductor</p>
                 <p className="text-micro text-ink-muted">
                   Nombre, celular, cédula, vencimiento de la licencia y los campos adicionales.
-                  {driver.tieneCedula ? '' : ' Le falta la cédula.'}
+                </p>
+                <p className="mt-1 text-micro text-ink-muted">
+                  Cédula:{' '}
+                  {cedula.data?.cedula ? (
+                    <span className="select-all font-mono text-base text-ink">{cedula.data.cedula}</span>
+                  ) : cedula.isLoading ? (
+                    '…'
+                  ) : driver.tieneCedula ? (
+                    'registrada, pero no se puede mostrar: escríbala de nuevo en «Editar datos».'
+                  ) : (
+                    <span className="font-medium text-ink">sin registrar</span>
+                  )}
                 </p>
               </div>
               <Button size="sm" variant="primary" onClick={() => setEditando(true)}>
@@ -565,26 +618,48 @@ export function GestionConductor({
 
           {gestionar ? (
             <>
-              <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
-                <div className="min-w-0">
+              <div className="space-y-3 border-t border-line pt-3">
+                <div>
                   <p className="flex items-center gap-1.5 text-base text-ink">
                     <CreditCard className="size-3.5 shrink-0 text-ink-muted" />
-                    Recibe pagos electrónicos
+                    Medios de pago que recibe
                   </p>
                   <p className="text-micro text-ink-muted">
-                    {driver.aceptaPagoElectronico
-                      ? 'Le llegan también las carreras de clientes que pagan con Nequi, transferencia o datáfono.'
-                      : 'No le llegan las carreras de clientes que pagan con pago electrónico.'}
+                    Una carrera que se paga con uno de estos medios solo se le ofrece a quien lo tiene marcado. El
+                    efectivo lo reciben todos.
                   </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {MEDIOS_ELECTRONICOS.map((c) => (
+                      <BotonDeCapacidad
+                        key={c}
+                        cual={c}
+                        activa={capacidades.includes(c)}
+                        ocupado={cambiarCapacidad.isPending}
+                        onCambiar={() => cambiarCapacidad.mutate(c)}
+                      />
+                    ))}
+                  </div>
                 </div>
-                <Button
-                  size="sm"
-                  variant={driver.aceptaPagoElectronico ? 'secondary' : 'primary'}
-                  loading={cambiarPago.isPending}
-                  onClick={() => cambiarPago.mutate(!driver.aceptaPagoElectronico)}
-                >
-                  {driver.aceptaPagoElectronico ? 'Quitar' : 'Habilitar'}
-                </Button>
+                <div>
+                  <p className="flex items-center gap-1.5 text-base text-ink">
+                    <Car className="size-3.5 shrink-0 text-ink-muted" />
+                    Servicios que presta
+                  </p>
+                  <p className="text-micro text-ink-muted">
+                    Llevar mascotas, domicilios de licorera y cables de inicio: solo se le ofrecen a quien los presta.
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {SERVICIOS.map((c) => (
+                      <BotonDeCapacidad
+                        key={c}
+                        cual={c}
+                        activa={capacidades.includes(c)}
+                        ocupado={cambiarCapacidad.isPending}
+                        onCambiar={() => cambiarCapacidad.mutate(c)}
+                      />
+                    ))}
+                  </div>
+                </div>
               </div>
 
               <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
@@ -948,5 +1023,37 @@ function EliminarConductor({ driver, rideCode }: { driver: Driver; rideCode?: st
         </div>
       </Modal>
     </div>
+  );
+}
+
+/** Una capacidad del conductor: prendida se ve llena; un clic la cambia. */
+function BotonDeCapacidad({
+  cual,
+  activa,
+  ocupado,
+  onCambiar,
+}: {
+  cual: Capacidad;
+  activa: boolean;
+  ocupado: boolean;
+  onCambiar: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={activa}
+      disabled={ocupado}
+      onClick={onCambiar}
+      className={
+        'inline-flex h-9 items-center gap-1.5 rounded-full border-2 px-3.5 text-base font-medium transition-colors duration-150 disabled:opacity-60 ' +
+        (activa
+          ? 'border-ink bg-ink text-on-ink'
+          : 'border-line bg-surface text-ink-secondary hover:border-line-strong')
+      }
+    >
+      {activa ? <Check className="size-4" /> : null}
+      {CAPACIDAD_LABEL[cual]}
+    </button>
   );
 }

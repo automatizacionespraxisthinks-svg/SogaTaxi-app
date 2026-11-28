@@ -14,7 +14,7 @@ export interface ModalProps {
   subtitle?: ReactNode;
   footer?: ReactNode;
   /** `lg` deja sitio a un mapa al lado del formulario. */
-  width?: 'md' | 'lg';
+  width?: 'md' | 'lg' | 'xl';
   children: ReactNode;
 }
 
@@ -63,7 +63,7 @@ export function Modal({ open, onClose, title, subtitle, footer, width = 'md', ch
             aria-label={typeof title === 'string' ? title : 'Formulario'}
             className={cn(
               'relative flex max-h-full w-full flex-col overflow-hidden rounded-xl bg-surface shadow-lg',
-              width === 'lg' ? 'max-w-4xl' : 'max-w-lg',
+              width === 'xl' ? 'max-w-[84rem]' : width === 'lg' ? 'max-w-4xl' : 'max-w-lg',
             )}
           >
             <header className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">

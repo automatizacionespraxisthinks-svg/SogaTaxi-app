@@ -54,10 +54,11 @@ export function prepararSonido(): () => void {
 }
 
 /**
- * Cuánto suena cada oferta (26/11/2026): dos segundos y se calla. Antes daba
- * tres vueltas (unos 7 s) y, con tantas carreras llegando, cansaba.
+ * Cuánto suena cada oferta: tres segundos y se calla (28/11/2026; fueron dos
+ * desde el 26/11). Antes daba tres vueltas (unos 7 s) y, con tantas carreras
+ * llegando, cansaba.
  */
-const SEGUNDOS_DE_SONIDO = 2;
+const SEGUNDOS_DE_SONIDO = 3;
 
 /**
  * Suena la oferta y devuelve con qué callarla (al aceptar, rechazar o

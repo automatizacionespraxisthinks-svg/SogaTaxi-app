@@ -42,8 +42,8 @@ android {
         // Sube en cada APK que se entrega: es el número que la app compara
         // con el de la API (APP_ANDROID_VERSION_CODE) para avisar que hay
         // una versión nueva.
-        versionCode = 6
-        versionName = "0.4.2"
+        versionCode = 7
+        versionName = "0.5.0"
     }
 
     buildTypes {

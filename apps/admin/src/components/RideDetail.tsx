@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Ban, Banknote, Camera, Car, CreditCard, ExternalLink, MapPin, MapPinOff, MessageSquare, RefreshCw } from 'lucide-react';
-import type { Driver, Ride, RideOffer, WaveLogEntry } from '@tax/shared';
+import type { Driver, MedioDePago, Ride, RideOffer, WaveLogEntry } from '@tax/shared';
+import { MEDIOS_DE_PAGO, MEDIO_DE_PAGO_LABEL, SERVICIO_LABEL, conductorPuede, resumenDeExigencias } from '@tax/shared';
 import {
   VEHICLE_TYPE_LABEL,
   ACTOR_LABEL,
@@ -142,9 +143,14 @@ function Resumen({ ride, driver }: { ride: Ride; driver?: Driver }) {
         <Meta label="Paga con">
           <span className={cn('inline-flex items-center gap-1.5', ride.pagoElectronico && 'font-medium text-brand-ink')}>
             {ride.pagoElectronico ? <CreditCard className="size-3.5" /> : <Banknote className="size-3.5" />}
-            {ride.pagoElectronico ? 'Pago electrónico' : 'Efectivo'}
+            {MEDIO_DE_PAGO_LABEL[ride.medioPago ?? 'efectivo']}
           </span>
         </Meta>
+        {ride.servicio ? (
+          <Meta label="Servicio">
+            <span className="font-medium text-brand-ink">{SERVICIO_LABEL[ride.servicio]}</span>
+          </Meta>
+        ) : null}
       </div>
 
       {ride.status === 'CANCELLED' ? <QuienCancelo ride={ride} /> : null}
@@ -319,26 +325,24 @@ function RideActions({ ride }: { ride: Ride }) {
   const puede = usePuede();
 
   // Las mismas reglas que el despacho: ni suspendidos, ni quien no recibe
-  // pago electrónico si la carrera se paga así. La API también lo exige.
+  // ese medio de pago o no presta ese servicio. La API también lo exige.
   const available = drivers.filter(
-    (d) =>
-      d.status === 'AVAILABLE' &&
-      !d.suspendidoHasta &&
-      (!ride.pagoElectronico || d.aceptaPagoElectronico),
+    (d) => d.status === 'AVAILABLE' && !d.suspendidoHasta && conductorPuede(d, ride),
   );
+  const exige = resumenDeExigencias(ride);
   const allowed = transitionsFrom(ride.status, 'operator');
   if (allowed.length === 0) return null;
 
   /** Solo sin asignar: es la salida cuando nadie con pago electrónico la tomó. */
-  const cambiarPago = (pagoElectronico: boolean) => {
+  const cambiarPago = (medioPago: MedioDePago) => {
     setCambiandoPago(true);
     void api
-      .patch(`/v1/admin/rides/${ride.id}/payment`, { pagoElectronico })
+      .patch(`/v1/admin/rides/${ride.id}/payment`, { medioPago })
       .then(() => loadRideDetail(ride.id))
       .then(() =>
         push({
           tone: 'info',
-          title: pagoElectronico ? 'Ahora paga con pago electrónico' : 'Ahora paga en efectivo',
+          title: `Ahora paga con ${MEDIO_DE_PAGO_LABEL[medioPago].toLowerCase()}`,
           description: 'Relanza el despacho para volver a buscar taxi.',
         }),
       )
@@ -391,14 +395,25 @@ function RideActions({ ride }: { ride: Ride }) {
         ) : null}
 
         {canPago ? (
-          <Button
-            variant="secondary"
-            icon={ride.pagoElectronico ? <Banknote className="size-3.5" /> : <CreditCard className="size-3.5" />}
-            loading={cambiandoPago}
-            onClick={() => cambiarPago(!ride.pagoElectronico)}
-          >
-            {ride.pagoElectronico ? 'Cambiar a efectivo' : 'Cambiar a pago electrónico'}
-          </Button>
+          <label className="flex items-center gap-2 text-base text-ink-secondary">
+            Cambiar pago a
+            <Select
+              aria-label="Cambiar el medio de pago"
+              value=""
+              disabled={cambiandoPago}
+              onChange={(e) => {
+                if (e.target.value) cambiarPago(e.target.value as MedioDePago);
+              }}
+              className="w-auto"
+            >
+              <option value="">Elegir…</option>
+              {MEDIOS_DE_PAGO.filter((m) => m !== ride.medioPago).map((m) => (
+                <option key={m} value={m}>
+                  {MEDIO_DE_PAGO_LABEL[m]}
+                </option>
+              ))}
+            </Select>
+          </label>
         ) : null}
 
         {canAssign ? (
@@ -446,7 +461,7 @@ function RideActions({ ride }: { ride: Ride }) {
           >
             <div className="flex items-end gap-2 pt-1">
               <Field
-                label={ride.pagoElectronico ? 'Conductor disponible con pago electrónico' : 'Conductor disponible'}
+                label={exige ? `Conductor disponible con ${exige}` : 'Conductor disponible'}
                 className="flex-1"
                 htmlFor="assign-driver"
               >
@@ -490,10 +505,10 @@ function RideActions({ ride }: { ride: Ride }) {
         ) : null}
       </AnimatePresence>
 
-      {ride.status === 'UNASSIGNED' && ride.pagoElectronico ? (
+      {ride.status === 'UNASSIGNED' && exige ? (
         <p className="text-caption text-ink-secondary">
-          Se ofreció solo a conductores que reciben pago electrónico. Si el cliente puede pagar en
-          efectivo, cámbiala y relanza el despacho.
+          Se ofreció solo a conductores con {exige}.
+          {ride.pagoElectronico ? ' Si el cliente puede pagar de otra forma, cámbiela y relance el despacho.' : ''}
         </p>
       ) : null}
 

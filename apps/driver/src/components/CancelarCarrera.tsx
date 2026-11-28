@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Ban, Check } from 'lucide-react';
 import {
+  MINUTOS_DE_SANCION_POR_CANCELAR,
   MOTIVOS_CANCELACION_CONDUCTOR,
   cancelacionConductorSchema,
   type MotivoCancelacionConductor,
@@ -20,9 +21,12 @@ import { TONE_CLASS, cn, transition } from '@tax/ui';
  */
 export function CancelarCarrera({
   code,
+  yaLlego = false,
   onConfirmar,
 }: {
   code: string;
+  /** Ya pulsó «Llegué»: solo entonces puede decir que el cliente no aparece. */
+  yaLlego?: boolean;
   /** Devuelve el error para mostrarlo, o `null` si se canceló. */
   onConfirmar: (motivo: MotivoCancelacionConductor, detalle?: string) => Promise<string | null>;
 }) {
@@ -93,14 +97,18 @@ export function CancelarCarrera({
                 <h2 className="mt-1 text-2xl font-bold text-ink">¿Cancelar la carrera?</h2>
                 <p className="mt-2 text-lg leading-snug text-ink-secondary">
                   Solo por una causa mayor. Al cliente se le busca otro taxi enseguida y la oficina recibe
-                  el aviso con el motivo. Si el cliente no aparece, la carrera se cierra.
+                  el aviso con el motivo.
+                </p>
+                <p className={cn(TONE_CLASS.warning, 'mt-3 rounded-lg border border-[var(--tone-line)] bg-[var(--tone-bg)] px-4 py-3 text-lg font-semibold leading-snug text-ink')}>
+                  Cancelar una carrera ya aceptada sin una causa mayor lo suspende {MINUTOS_DE_SANCION_POR_CANCELAR} minutos.
+                  También la segunda cancelación del día.
                 </p>
 
                 <fieldset className="mt-4 space-y-2">
                   <legend className="mb-2 text-micro font-semibold uppercase tracking-[0.07em] text-ink-muted">
                     ¿Por qué?
                   </legend>
-                  {MOTIVOS_CANCELACION_CONDUCTOR.map((m) => {
+                  {MOTIVOS_CANCELACION_CONDUCTOR.filter((m) => m.clave !== 'cliente_no_aparece' || yaLlego).map((m) => {
                     const elegido = motivo === m.clave;
                     return (
                       <button

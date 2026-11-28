@@ -154,12 +154,19 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
             // Sin «arreglar», el botón pide el permiso; si Android ya no
             // muestra el diálogo (dos negativas), `rememberPedirPermisos` abre
             // los ajustes de la app.
-            Requisito("Ubicación", tienePermisoDeUbicacion()),
-            Requisito("Ubicación «Permitir todo el tiempo»", tieneUbicacionSiempre()),
-            Requisito("GPS del teléfono encendido", gps) {
+            Requisito("Ubicación", tienePermisoDeUbicacion(), detalle = "Para ofrecerte las carreras que te quedan cerca."),
+            Requisito(
+                "Ubicación todo el tiempo", tieneUbicacionSiempre(),
+                detalle = "Elige «Permitir todo el tiempo»: así el GPS sigue con la app cerrada.",
+            ),
+            Requisito("GPS encendido", gps, detalle = "Enciende la ubicación del teléfono.", accion = "Encender") {
                 abrirAjuste(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
             },
-            Requisito("Notificaciones", NotificationManagerCompat.from(app).areNotificationsEnabled() && canalOfertas) {
+            Requisito(
+                "Notificaciones",
+                NotificationManagerCompat.from(app).areNotificationsEnabled() && canalOfertas,
+                detalle = "Para que las ofertas suenen y se vean.",
+            ) {
                 abrirAjuste(
                     Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                         .putExtra(Settings.EXTRA_APP_PACKAGE, app.packageName),
@@ -168,7 +175,10 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
             },
             // La oferta suena por el canal de alarma: con ese volumen en 0
             // no se oye aunque el timbre esté alto.
-            Requisito("Volumen de alarma", volumenAlarma) {
+            Requisito(
+                "Volumen de alarma", volumenAlarma,
+                detalle = "Las ofertas suenan por la alarma: está en silencio.", accion = "Subir",
+            ) {
                 runCatching {
                     val audio = app.getSystemService(AudioManager::class.java)
                     audio.setStreamVolume(
@@ -178,12 +188,18 @@ class PlataformaAndroid(private val app: Context) : Plataforma {
                     )
                 }.onFailure { mensajeBreve("Sube el volumen de la alarma en Ajustes › Sonido.") }
             },
-            Requisito("Ofertas a pantalla completa", pantallaCompleta) {
+            Requisito(
+                "Ofertas a pantalla completa", pantallaCompleta,
+                detalle = "La oferta aparece aunque el teléfono esté bloqueado.",
+            ) {
                 if (Build.VERSION.SDK_INT >= 34) {
                     abrirAjuste(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, paquete))
                 }
             },
-            Requisito("Sin límite de batería", bateria) {
+            Requisito(
+                "Sin límite de batería", bateria,
+                detalle = "Para que Android no cierre la app durante el turno.",
+            ) {
                 @SuppressLint("BatteryLife")
                 abrirAjuste(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, paquete))
             },

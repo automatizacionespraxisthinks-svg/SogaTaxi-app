@@ -67,3 +67,47 @@ export function cancelacionRelanza(motivo: MotivoCancelacionConductor | string |
 
 /** Los estados desde los que el conductor todavía puede cancelar. */
 export const CANCELABLE_POR_EL_CONDUCTOR = ['ASSIGNED', 'DRIVER_ARRIVED'] as const;
+
+/* ------------------------------------------------ sanción por cancelar --- */
+
+/**
+ * La sanción por soltar una carrera ya aceptada (27/11/2026): 30 minutos sin
+ * poder trabajar. El cliente se quedó esperando un taxi que le habían
+ * prometido, y hasta ahora cancelar no le costaba nada al conductor.
+ *
+ * La regla:
+ *  - «Otro motivo» es cancelar sin justificación: se sanciona siempre.
+ *  - Falla mecánica, accidente o emergencia son fuerza mayor: la primera del
+ *    día no se sanciona. Desde la segunda sí, y la oficina recibe el aviso:
+ *    si no, bastaría con marcar siempre «falla mecánica».
+ *  - «El cliente no aparece» no se sanciona, pero solo se puede marcar con el
+ *    taxi ya en el punto (`puedeMarcarClienteNoAparece`).
+ *
+ * La carrera se relanza igual en todos los casos; la oficina puede levantar
+ * la sanción desde la ficha del conductor.
+ */
+export const MINUTOS_DE_SANCION_POR_CANCELAR = 30;
+
+/** Cuántas cancelaciones por fuerza mayor se le pasan a un conductor en un día. */
+export const CANCELACIONES_JUSTIFICADAS_POR_DIA = 1;
+
+export function sancionPorCancelar(
+  motivo: MotivoCancelacionConductor | string,
+  /** Las que ya llevaba hoy por fuerza mayor, sin contar esta. */
+  justificadasHoy: number,
+): { minutos: number; razon: string } | null {
+  if (motivo === 'cliente_no_aparece') return null;
+  if (motivo === 'otro') {
+    return { minutos: MINUTOS_DE_SANCION_POR_CANCELAR, razon: 'canceló una carrera aceptada sin un motivo de fuerza mayor' };
+  }
+  if (justificadasHoy >= CANCELACIONES_JUSTIFICADAS_POR_DIA) {
+    return {
+      minutos: MINUTOS_DE_SANCION_POR_CANCELAR,
+      razon: `es su cancelación número ${justificadasHoy + 1} de hoy por fuerza mayor`,
+    };
+  }
+  return null;
+}
+
+/** «El cliente no aparece» solo vale con el taxi ya en el punto. */
+export const puedeMarcarClienteNoAparece = (estadoDeLaCarrera: string) => estadoDeLaCarrera === 'DRIVER_ARRIVED';

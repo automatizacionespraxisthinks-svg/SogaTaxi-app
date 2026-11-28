@@ -102,6 +102,13 @@ export const PERMISOS = [
     requiere: 'reportes.ver',
   },
   {
+    clave: 'operadoras.ver',
+    area: 'Reportes',
+    nombre: 'Ver el trabajo de las operadoras',
+    descripcion:
+      'La sección Operadoras: cuántas carreras registró cada persona de la oficina, cuántas asignó a mano, relanzó o canceló, y a qué horas.',
+  },
+  {
     clave: 'clientes.datos',
     area: 'Sistema',
     nombre: 'Atender solicitudes de datos personales',

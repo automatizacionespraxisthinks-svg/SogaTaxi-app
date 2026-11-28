@@ -5,6 +5,7 @@ import { basename } from 'node:path';
 import { Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { eq } from 'drizzle-orm';
+import { esMedioElectronico } from '@tax/shared';
 import { uuidv7 } from 'uuidv7';
 import { DB, DbModule, type Database } from '../db/db.module';
 import { drivers, vehicleDrivers, vehicles } from '../db/schema';
@@ -52,6 +53,8 @@ interface Informe {
     actualizados: number;
     sinCambios: number;
     desactivados: number;
+    /** A cuántos se les cargaron medios de pago o servicios. */
+    conCapacidades: number;
     conPinNuevo: { codigo: string; nombre: string; pin: string | null }[];
   };
   vinculos: { nuevos: number; yaEstaban: number };
@@ -69,7 +72,7 @@ async function cargar(
 ): Promise<Informe> {
   const informe: Informe = {
     vehiculos: { nuevos: 0, actualizados: 0, sinCambios: 0, sinMovil: [] },
-    conductores: { nuevos: 0, actualizados: 0, sinCambios: 0, desactivados: 0, conPinNuevo: [] },
+    conductores: { nuevos: 0, actualizados: 0, sinCambios: 0, desactivados: 0, conCapacidades: 0, conPinNuevo: [] },
     vinculos: { nuevos: 0, yaEstaban: 0 },
     pendientes: [],
   };
@@ -128,6 +131,7 @@ async function cargar(
       documentHash: drivers.documentHash,
       licenseExpiresOn: drivers.licenseExpiresOn,
       active: drivers.active,
+      capacidades: drivers.capacidades,
     })
     .from(drivers);
   const porHuella = new Map(actuales.filter((d) => d.documentHash).map((d) => [d.documentHash!, d]));
@@ -172,7 +176,10 @@ async function cargar(
         licenseExpiresOn: p.licenciaVence,
         pinHash,
         active: !p.suspendido,
+        capacidades: p.capacidades,
+        aceptaPagoElectronico: p.capacidades.some(esMedioElectronico),
       });
+      if (p.capacidades.length) informe.conductores.conCapacidades += 1;
       if (pinNuevo) informe.conductores.conPinNuevo.push({ codigo, nombre: p.nombre, pin: aplicar ? pinNuevo : null });
       if (p.suspendido) informe.conductores.desactivados += 1;
       informe.conductores.nuevos += 1;
@@ -193,6 +200,13 @@ async function cargar(
     if (huella && !actual.documentHash) {
       cambios.documentEncrypted = encryptColumn(clave, p.cedula!);
       cambios.documentHash = huella;
+    }
+    // Los medios de pago y servicios se cargan una vez: si la oficina ya le
+    // marcó alguno en el panel, lo del listado no los pisa.
+    if (actual.capacidades.length === 0 && p.capacidades.length > 0) {
+      cambios.capacidades = p.capacidades;
+      cambios.aceptaPagoElectronico = p.capacidades.some(esMedioElectronico);
+      informe.conductores.conCapacidades += 1;
     }
     if (Object.keys(cambios).length === 0) {
       informe.conductores.sinCambios += 1;
@@ -288,6 +302,7 @@ async function main(): Promise<void> {
     console.log(`  sin cambios   ${i.conductores.sinCambios}`);
     console.log(`  cargados como desactivados (suspendidos en Autocab): ${i.conductores.desactivados}`);
     console.log(`  con PIN nuevo (no traían uno de Autocab): ${i.conductores.conPinNuevo.length}`);
+    console.log(`  con medios de pago o servicios cargados: ${i.conductores.conCapacidades}`);
 
     console.log(`\nCarros que puede manejar cada conductor: ${i.vinculos.nuevos} nuevos, ${i.vinculos.yaEstaban} ya estaban`);
 

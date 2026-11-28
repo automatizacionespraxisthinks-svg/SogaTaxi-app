@@ -19,6 +19,8 @@ export interface OfferPush {
   pickupReference?: string | null;
   /** Si el cliente paga con pago electrónico; ausente es efectivo. */
   pagoElectronico?: boolean;
+  medioPago?: 'efectivo' | 'nequi' | 'daviplata' | 'llave' | 'electronico' | null;
+  servicio?: 'mascotas' | 'licorera' | 'cables' | null;
   passengers: number;
   distanceKm: number;
   etaMinutes: number;

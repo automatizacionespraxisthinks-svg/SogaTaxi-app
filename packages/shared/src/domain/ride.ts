@@ -1,3 +1,4 @@
+import { MEDIOS_DE_PAGO_ACEPTADOS, SERVICIOS, type MedioDePago, type Servicio } from './capacidades';
 import { z } from 'zod';
 import { pointSchema, type WaveConfig } from './geo';
 
@@ -289,6 +290,15 @@ export const createRideSchema = z.object({
    */
   pagoElectronico: z.boolean().default(false),
   /**
+   * El medio exacto (27/11/2026): `efectivo`, `nequi`, `daviplata` o `llave`.
+   * Solo se le ofrece a los conductores que reciben ese medio. Si no viene,
+   * vale lo que diga `pagoElectronico`: efectivo, o «algún medio
+   * electrónico» sin especificar.
+   */
+  medioPago: z.enum(MEDIOS_DE_PAGO_ACEPTADOS).optional(),
+  /** Un servicio que no presta cualquiera: mascotas, licorera o cables de inicio. */
+  servicio: z.enum(SERVICIOS).optional(),
+  /**
    * La línea de WhatsApp por la que escribió el cliente (20/11/2026). Vale
    * cualquiera de las tres formas que n8n puede tener a mano: el nombre de
    * la sesión de WAHA, el número de la línea (con o sin +57) o su nombre en
@@ -354,6 +364,8 @@ export const crearCarreraOficinaSchema = z.object({
   /** Varios taxis al mismo punto, como `cantidad` en el pedido de n8n. */
   cantidad: z.coerce.number().int().min(1).max(MAX_CARRERAS_ACTIVAS).default(1),
   pagoElectronico: z.boolean().default(false),
+  medioPago: z.enum(MEDIOS_DE_PAGO_ACEPTADOS).optional(),
+  servicio: z.enum(SERVICIOS).optional(),
   notes: z.string().trim().max(280).optional(),
 });
 export type CrearCarreraOficinaInput = z.input<typeof crearCarreraOficinaSchema>;
@@ -483,6 +495,10 @@ export interface Ride {
   passengers: number;
   /** Paga con pago electrónico; ausente o falso, en efectivo. */
   pagoElectronico?: boolean;
+  /** El medio exacto; ausente en carreras de antes del 27/11/2026. */
+  medioPago?: MedioDePago;
+  /** Mascotas, licorera o cables de inicio, si la carrera es de eso. */
+  servicio?: Servicio;
   /**
    * Lo que se recorrió, una vez conocido el destino. Ausente mientras la
    * carrera no ha terminado, y también después si el conductor cerró sin GPS.

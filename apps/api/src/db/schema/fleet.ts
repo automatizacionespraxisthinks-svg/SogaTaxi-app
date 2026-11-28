@@ -1,3 +1,4 @@
+import type { Capacidad } from '@tax/shared';
 import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
@@ -53,6 +54,18 @@ export const drivers = pgTable(
      * carreras de clientes que pagan así solo se les ofrecen a ellos.
      */
     aceptaPagoElectronico: boolean('acepta_pago_electronico').notNull().default(false),
+    /**
+     * Lo que este conductor tiene (27/11/2026): los medios de pago que
+     * recibe (`nequi`, `daviplata`, `llave`) y los servicios que presta
+     * (`mascotas`, `licorera`, `cables`). Una carrera que exige alguno solo
+     * se le ofrece a quien lo tiene. `acepta_pago_electronico` se mantiene
+     * al día con esta lista: es verdadero si recibe algún medio electrónico.
+     */
+    capacidades: text('capacidades')
+      .array()
+      .$type<Capacidad[]>()
+      .notNull()
+      .default(sql`'{}'::text[]`),
     /**
      * Suspensión por el reglamento interno: hasta cuándo no puede trabajar.
      *
@@ -162,6 +175,21 @@ export const camposExtra = pgTable(
   },
   (table) => [uniqueIndex('campos_extra_nombre_key').on(table.entidad, table.nombre)],
 );
+
+/**
+ * Las reglas de la flota que la empresa prende o apaga desde el panel
+ * (27/11/2026). Una sola fila.
+ *
+ * `bloquear_por_documentos`: con la licencia, el SOAT o la técnico-mecánica
+ * vencidos, el conductor no abre turno ni recibe carreras. Nace apagada: los
+ * datos de la carga inicial traen fechas viejas, y prenderla sin revisarlas
+ * dejaría por fuera a quien sí tiene los papeles al día.
+ */
+export const reglasDeFlota = pgTable('fleet_rules', {
+  id: integer('id').primaryKey().default(1),
+  bloquearPorDocumentos: boolean('bloquear_por_documentos').notNull().default(false),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const vehicleDrivers = pgTable(
   'vehicle_drivers',

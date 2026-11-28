@@ -55,10 +55,23 @@ export function resolveColor(value: string, fallback: string): string {
 }
 
 /** Lee un token del sistema de diseño y lo deja listo para MapLibre. */
+/*
+ * Los colores ya resueltos (27/11/2026). Resolver uno cuesta leer el estilo
+ * calculado de la página y rasterizar un píxel, y el mapa lo pedía por cada
+ * taxi en cada movimiento: cientos de veces por segundo con la flota en la
+ * calle. El panel tiene un solo tema, así que el valor no cambia nunca.
+ */
+const tokensResueltos = new Map<string, string>();
+
 export function token(name: string, fallback = 'transparent'): string {
   if (typeof document === 'undefined') return fallback;
+  const guardado = tokensResueltos.get(name);
+  if (guardado) return guardado;
   const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return raw ? resolveColor(raw, fallback) : fallback;
+  if (!raw) return fallback;
+  const color = resolveColor(raw, fallback);
+  if (color !== fallback) tokensResueltos.set(name, color);
+  return color;
 }
 
 export interface MapPalette {

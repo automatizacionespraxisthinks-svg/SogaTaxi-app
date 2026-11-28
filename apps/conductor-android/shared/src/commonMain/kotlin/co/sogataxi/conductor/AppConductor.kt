@@ -9,11 +9,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
@@ -106,9 +109,7 @@ private fun Raiz() {
 
     Column(Modifier.fillMaxSize().background(Marca.fondo)) {
         Cabecera(sesion, diag.turnoDesde != null)
-        AvisoDeConexion(sesion)
-        // En carrera no: el conductor no va a actualizar con un cliente a bordo.
-        versionNueva?.takeIf { sesion.fase != Fase.CARRERA }?.let { AvisoDeVersion(it) }
+        Letreros(sesion, versionNueva)
         when (sesion.fase) {
             Fase.ACCESO -> PantallaAcceso(sesion)
             Fase.FUERA_DE_TURNO -> PantallaFueraDeTurno(sesion, alAbrir = {
@@ -167,51 +168,61 @@ private fun Cabecera(sesion: EstadoSesion, servicio: Boolean) {
 }
 
 /**
- * Lo que el conductor tiene que saber de la conexión: que no hay señal, que
- * hay etapas guardadas esperando, o lo que la oficina rechazó.
+ * Lo que el conductor tiene que saber antes que nada, entre la cabecera y la
+ * pantalla: etapas sin enviar, lo que dijo la oficina, una versión nueva y
+ * los documentos que se le vencen. Sin nada que decir, no ocupa sitio.
+ *
+ * En carrera solo queda lo que afecta a la carrera: con un cliente a bordo
+ * no va a actualizar la app ni a renovar el SOAT.
  */
 @Composable
-private fun AvisoDeConexion(sesion: EstadoSesion) {
-    val texto = when {
-        sesion.encoladas > 0 -> "${sesion.encoladas} etapa${if (sesion.encoladas == 1) "" else "s"} guardada${if (sesion.encoladas == 1) "" else "s"}: se envía${if (sesion.encoladas == 1) "" else "n"} al volver la señal."
-        else -> null
-    }
-    if (texto != null) {
-        Text(
-            texto, color = Marca.tinta, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.fillMaxWidth().background(Color(0xFFFDEFDC)).padding(horizontal = 16.dp, vertical = 10.dp),
-        )
-    }
-    sesion.aviso?.let { aviso ->
-        Row(
-            Modifier.fillMaxWidth().background(Color(0xFFFFF7D1)).padding(start = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(aviso, color = Marca.tinta, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(vertical = 10.dp))
-            TextButton(onClick = { Sesion.avisar(null) }) { Text("OK", color = Marca.tinta, fontWeight = FontWeight.Bold) }
-        }
-    }
-}
+private fun Letreros(sesion: EstadoSesion, versionNueva: VersionNueva?) {
+    val enCarrera = sesion.fase == Fase.CARRERA
+    val version = versionNueva?.takeIf { !enCarrera }
+    val documentos = sesion.documentos.takeIf { !enCarrera && sesion.fase != Fase.ACCESO }.orEmpty()
+    if (sesion.encoladas == 0 && sesion.aviso == null && version == null && documentos.isEmpty()) return
 
-/** Hay una versión más nueva: una franja con el botón que abre la descarga. */
-@Composable
-private fun AvisoDeVersion(version: VersionNueva) {
-    Row(
-        Modifier.fillMaxWidth().background(if (version.obligatoria) Color(0xFFFDE8E2) else Color(0xFFE6F4EA)).padding(start = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    // Con tope y desplazamiento propio: en un teléfono pequeño, tres letreros
+    // no pueden dejar sin sitio el botón de iniciar turno.
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = 260.dp)
+            .verticalScroll(rememberScrollState())
+            .padding(start = 12.dp, end = 12.dp, top = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(
-            buildString {
-                append(if (version.obligatoria) "Tienes que actualizar la app para abrir turno" else "Hay una versión nueva de la app")
-                version.nombre?.let { append(" ($it)") }
-                append(".")
-            },
-            color = Marca.tinta, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.weight(1f).padding(vertical = 10.dp),
-        )
-        TextButton(onClick = { plataforma.abrirEnlace(version.enlace) }) {
-            Text("Actualizar", color = Marca.tinta, fontWeight = FontWeight.Bold)
+        if (sesion.encoladas > 0) {
+            val una = sesion.encoladas == 1
+            Letrero(
+                Tono.ALERTA,
+                titulo = if (una) "Una etapa sin enviar" else "${sesion.encoladas} etapas sin enviar",
+                texto = "Queda${if (una) "" else "n"} guardada${if (una) "" else "s"} en el teléfono y se envía${if (una) "" else "n"} al volver la señal.",
+            )
         }
+        sesion.aviso?.let { aviso ->
+            val suspendido = aviso.startsWith("Está suspendido") || aviso.startsWith("Quedó suspendido")
+            Letrero(
+                if (suspendido) Tono.CRITICO else Tono.INFO,
+                titulo = if (suspendido) "Cuenta suspendida" else "Aviso",
+                texto = aviso,
+                accion = "Entendido",
+                alPulsar = { Sesion.avisar(null) },
+            )
+        }
+        version?.let {
+            Letrero(
+                if (it.obligatoria) Tono.CRITICO else Tono.EXITO,
+                titulo = if (it.obligatoria) "Actualiza la app para abrir turno" else "Hay una versión nueva",
+                texto = listOfNotNull(
+                    it.nombre?.let { nombre -> "Versión $nombre." },
+                    if (it.obligatoria) "La que tienes ya no funciona con la oficina." else "Instálala cuando estés sin carrera.",
+                ).joinToString(" "),
+                accion = "Actualizar",
+                alPulsar = { plataforma.abrirEnlace(it.enlace) },
+            )
+        }
+        LetreroDeDocumentos(documentos)
     }
 }
 
@@ -254,7 +265,8 @@ fun PantallaOferta(oferta: OfertaDeCarrera, alAceptar: () -> Unit, alRechazar: (
             Text(
                 buildString {
                     append("${oferta.pasajeros} pasajero${if (oferta.pasajeros == 1) "" else "s"}")
-                    if (oferta.pagoElectronico) append(" · Pago electrónico")
+                    if (oferta.pagoElectronico) append(" · ${textoDelPago(true, oferta.medioPago)}")
+                    textoDelServicio(oferta.servicio)?.let { append(" · $it") }
                     append(" · ${oferta.codigo}")
                 },
                 color = Marca.sobreTinta.copy(alpha = 0.75f), fontSize = 16.sp,

@@ -327,6 +327,11 @@ El panel no inventa acciones: cada botón sale de la tabla de transiciones.
      urbana» sin orden fijo, y en producción salía Lago Sochagota. El panel
      no la pinta en el mapa y la ficha lo avisa, y el agente de n8n le pide
      la ubicación al cliente (flujo «Actualizados 2026-11-03»).
+- **Cédula del conductor** (28/11/2026): se escribe al dar de alta (opcional) o
+  en «Editar datos», y se ve en la ficha. Va cifrada en `document_encrypted` y
+  no viaja con el listado de la flota: la ficha la pide aparte a
+  `GET /v1/admin/drivers/:id/cedula`, solo con «Gestionar conductores». Dos
+  conductores no pueden tener la misma (`drivers_document_hash_key`).
 - **Listado maestro**: `cli/importar-listado-maestro.ts` carga el Excel de la
   empresa (hoja «Taxis»): móviles con su número interno, ficha y propietario
   (cédula cifrada), conductores y relevadores con licencia y restricción, y
@@ -402,6 +407,50 @@ El panel no inventa acciones: cada botón sale de la tabla de transiciones.
   al cliente si puede pagar en efectivo, la cambia (`PATCH …/payment`) y la
   relanza. La asignación manual respeta la misma regla. El conductor ve el
   medio de pago en la oferta y en la carrera. Prueba: `e2e-pago-y-suspension.ts`.
+- **Medios de pago y servicios** (27/11/2026): el medio ya es exacto. Cada
+  conductor tiene sus «capacidades» (`drivers.capacidades`, desde la ficha en
+  *Flota*): los medios que recibe (`nequi`, `daviplata`, `llave`) y los
+  servicios que presta (`mascotas`, `licorera`, `cables`). Cada carrera lleva
+  `medioPago` (`efectivo`, `nequi`, `daviplata`, `llave`) y, si aplica,
+  `servicio`; solo se le ofrece a quien tenga las dos cosas. `pagoElectronico`
+  se mantiene y sigue valiendo para un cliente sin actualizar: sin `medioPago`
+  la carrera queda con el medio `electronico` («alguno», sin decir cuál) y va
+  a quien reciba cualquiera. La regla es una sola, `conductorPuede()` en
+  `packages/shared/src/domain/capacidades.ts`; el filtro SQL del despacho dice
+  lo mismo. No cambia tarifas. La carga inicial sale de la columna
+  «Capacidades» de Autocab (`importar-autocab`). Prueba: `capacidades.spec.ts`.
+- **Documentos vencidos** (27/11/2026): la licencia del conductor y el SOAT y
+  la técnico-mecánica del carro. El conductor ve el aviso al entrar a la
+  aplicación (`avisos` en `GET /v1/driver/rides/me`), desde 15 días antes. El
+  bloqueo —no abrir turno ni recibir carreras con algo vencido— se prende en
+  *Avisos* (`fleet_rules.bloquear_por_documentos`) y nace apagado; una fecha
+  vacía nunca bloquea. Regla en `packages/shared/src/domain/documentos.ts`.
+- **Sanción por cancelar** (27/11/2026): soltar una carrera ya aceptada
+  suspende 30 minutos al conductor —con «otro motivo» siempre, por fuerza
+  mayor desde la segunda del día—. Es la suspensión de siempre, corta y puesta
+  por el sistema; la oficina la puede levantar. «El cliente no aparece» solo
+  se admite con el taxi en el punto. La carrera se relanza igual. Regla en
+  `sancionPorCancelar()`; prueba: `sancion-y-documentos.spec.ts`.
+- **Sonido de la oferta: 3 segundos** (28/11/2026; eran 2 desde el 26/11). El
+  archivo se regenera con `apps/driver/scripts/generar-sonido.mjs` —dos
+  «pi-pi» y la campanita— y suena una vez; la vibración dura lo mismo.
+- **La marca vieja de «pago electrónico» sigue valiendo** en el conductor que
+  todavía no tiene ningún medio anotado (Nequi, Daviplata, Llave): recibe
+  también las carreras que piden un medio exacto, y marcarle un servicio no
+  se la quita. En cuanto se le anota un medio, vale solo lo anotado. Sin
+  esto, el día de la actualización una carrera con Nequi no tenía a quién
+  ofrecerse. `cumpleLasExigencias()` y `conductorPuede()` dicen lo mismo.
+- **Operadoras** (28/11/2026): una sección propia del panel, aparte de
+  Reportes, con lo que hizo cada persona de la oficina en el periodo: carreras
+  que registró con «Nueva carrera» (y cómo terminaron), asignaciones a mano,
+  relanzamientos, cancelaciones, horas del día y días trabajados. Cada carrera
+  guarda quién la registró (`rides.created_by`; la migración 0034 recupera las
+  anteriores desde el historial); relanzar y cancelar salen de
+  `ride_status_history`, y asignar a mano de la bitácora, porque en el
+  historial ese paso queda a nombre del conductor. Pide el permiso
+  `operadoras.ver`, que el rol `operador` no trae: se da desde Sistema › Roles.
+  Solo cuenta bien si cada operadora entra con su propio usuario. API:
+  `GET /v1/reports/operadoras` y `/:id/carreras`.
 - **Sin destino en la PWA**: el cliente casi nunca lo dice al pedir, y en la
   pantalla del conductor se confundía con la dirección de recogida. Se sigue
   guardando si llega, y el panel lo muestra.

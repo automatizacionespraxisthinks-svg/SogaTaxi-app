@@ -1,3 +1,4 @@
+import { MEDIO_DE_PAGO_LABEL } from '@tax/shared';
 import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Camera, Flag, LocateFixed, Lock, Navigation, Phone, UserCheck, X } from 'lucide-react';
@@ -93,7 +94,7 @@ export function Carrera({
           </div>
         ) : (
           // Con el pasajero a bordo lo que importa es cómo va a pagar.
-          <MedioDePago electronico={offer.pagoElectronico} grande />
+          <MedioDePago electronico={offer.pagoElectronico} medio={offer.medioPago} servicio={offer.servicio} grande />
         )}
 
         {/* La foto solo mientras va a recogerlo: después ya no le sirve, y
@@ -162,7 +163,8 @@ export function Carrera({
             <p className="mt-3 border-t border-line pt-3 text-lg text-ink-secondary">
               Paga con{' '}
               <span className={cn('font-semibold', offer.pagoElectronico ? 'text-brand-ink' : 'text-ink')}>
-                {offer.pagoElectronico ? 'pago electrónico' : 'efectivo'}
+                {MEDIO_DE_PAGO_LABEL[offer.medioPago ?? (offer.pagoElectronico ? 'electronico' : 'efectivo')] ??
+                  (offer.pagoElectronico ? 'Pago electrónico' : 'Efectivo')}
               </span>
             </p>
           ) : null}
@@ -217,7 +219,7 @@ export function Carrera({
         ) : null}
 
         {/* Solo antes de recoger al cliente: con él a bordo, se termina. */}
-        {status !== 'IN_PROGRESS' ? <CancelarCarrera code={offer.code} onConfirmar={onCancel} /> : null}
+        {status !== 'IN_PROGRESS' ? <CancelarCarrera code={offer.code} yaLlego={status === 'DRIVER_ARRIVED'} onConfirmar={onCancel} /> : null}
       </ActionBar>
     </>
   );

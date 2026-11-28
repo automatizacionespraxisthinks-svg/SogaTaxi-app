@@ -119,7 +119,7 @@ export function Oferta({
           {offer.zoneName ? <Chip>{offer.zoneName}</Chip> : null}
         </div>
 
-        <MedioDePago electronico={offer.pagoElectronico} />
+        <MedioDePago electronico={offer.pagoElectronico} medio={offer.medioPago} servicio={offer.servicio} />
 
         {offer.notes ? (
           <p className="rounded-md border border-line px-3 py-2.5 text-lg leading-snug text-ink-secondary">

@@ -1,3 +1,4 @@
+import type { AvisoDeDocumentos } from './components/AvisosDeDocumentos';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { MotionConfig, motion } from 'motion/react';
@@ -57,6 +58,8 @@ interface DriverSessionResponse {
   /** Turno abierto, si lo hay: decide si la PWA arranca en espera o fuera. */
   shift: { shiftId: string; plate: string; startedAt: string; paused: boolean } | null;
   totals: { rides: number };
+  /** Documentos vencidos o por vencer; de una API sin actualizar no llega. */
+  avisos?: AvisoDeDocumentos[];
   rules?: {
     minRideMinutes: number;
     /** Radio de «Llegué», en metros. */
@@ -80,6 +83,8 @@ export function App() {
   // carrera o su turno, no la pantalla de acceso.
   const [session, dispatch] = useReducer(sessionReducer, undefined, estadoInicial);
   const [notice, setNotice] = useState<string>();
+  /** Licencia, SOAT o técnico-mecánica vencidos o por vencer: se le avisa al entrar. */
+  const [documentos, setDocumentos] = useState<AvisoDeDocumentos[]>([]);
   const [push, setPush] = useState<PushState>(() => pushSupport());
   /**
    * Quién tiene la sesión y en qué carro, según la API. Con un celular que
@@ -121,6 +126,7 @@ export function App() {
       // vigilante en ese mismo ciclo y tiene que leer ya la cadencia buena.
       if (me.rules?.positionSeconds) cadencia.current = me.rules.positionSeconds;
       setConductor({ code: me.driver.code, name: me.driver.name });
+      setDocumentos(me.avisos ?? []);
       setQueueOwner(me.driver.code);
       /*
        * Con turno abierto y el permiso ya dado, la suscripción se vuelve a
@@ -214,7 +220,10 @@ export function App() {
          */
         dispatch({ type: 'logged_out' });
         setNotice(
-          'Tu sesión no está activa: puede que hayas entrado en otro celular, o que la oficina pausara tu acceso. Entra de nuevo o llama a la oficina.',
+          // Suspendido: el servidor dice hasta cuándo, y eso es lo que importa.
+          error.message.startsWith('Está suspendido')
+            ? error.message
+            : 'Tu sesión no está activa: puede que hayas entrado en otro celular, o que la oficina pausara tu acceso. Entra de nuevo o llama a la oficina.',
         );
       } else if (error instanceof ApiError && error.isRetryable) {
         /*
@@ -730,6 +739,7 @@ export function App() {
         >
             {session.phase === 'off_shift' || session.phase === 'available' || session.phase === 'paused' ? (
               <Turno
+                documentos={documentos}
                 session={session}
                 conductor={conductor}
                 placaDelTurno={placaDelTurno}
@@ -830,12 +840,23 @@ export function App() {
                    * ya cambió. Sin señal se le dice, y que llame a la oficina.
                    */
                   try {
-                    await api.post(`/v1/driver/rides/${rideId}/cancel`, {
-                      motivo,
-                      detalle,
-                      at: positionWatcher.current?.last(),
-                    });
+                    const cancelada = await api.post<{ sancion?: { minutos: number; hasta: string } | null }>(
+                      `/v1/driver/rides/${rideId}/cancel`,
+                      { motivo, detalle, at: positionWatcher.current?.last() },
+                    );
                     const code = session.offer?.code;
+                    if (cancelada?.sancion) {
+                      // Sancionado: el turno ya quedó cerrado en el servidor.
+                      const vuelve = new Date(cancelada.sancion.hasta).toLocaleTimeString('es-CO', {
+                        hour: 'numeric',
+                        minute: '2-digit',
+                      });
+                      dispatch({ type: 'logged_out' });
+                      setNotice(
+                        `Quedó suspendido ${cancelada.sancion.minutos} minutos por cancelar la carrera ${code ?? ''} que ya había aceptado. Puede volver a entrar a las ${vuelve}.`,
+                      );
+                      return null;
+                    }
                     dispatch({ type: 'back_to_available' });
                     setNotice(
                       motivo === 'cliente_no_aparece'

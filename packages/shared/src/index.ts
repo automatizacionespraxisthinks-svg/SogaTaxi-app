@@ -13,5 +13,7 @@ export * from './domain/suspension';
 export * from './domain/enlace-de-mapa';
 export * from './domain/permisos';
 export * from './domain/cancelacion';
+export * from './domain/capacidades';
+export * from './domain/documentos';
 export * from './format';
 export * from './domain/datos-cliente';

@@ -1,4 +1,4 @@
-import type { Oleada, Point, RideStatus, VehicleType } from '@tax/shared';
+import type { MedioDePago, Oleada, Point, RideStatus, Servicio, VehicleType } from '@tax/shared';
 
 /**
  * Estado de la sesión del conductor.
@@ -48,6 +48,9 @@ export interface OfferedRide {
    * antes de aceptar para no llevarse la sorpresa al cobrar.
    */
   pagoElectronico: boolean;
+  /** El medio exacto (Nequi, Daviplata, Llave) y el servicio, si los hay. */
+  medioPago?: MedioDePago;
+  servicio?: Servicio;
   distanceKm: number;
   etaMinutes: number;
   passengers: number;
@@ -326,6 +329,8 @@ interface ApiRide {
   pickupLink?: string | null;
   /** Ausente si la API todavía no se ha actualizado: efectivo. */
   pagoElectronico?: boolean;
+  medioPago?: MedioDePago | null;
+  servicio?: Servicio | null;
   passengers: number;
   vehicleType: VehicleType;
   notes: string | null;
@@ -343,6 +348,8 @@ export interface ApiOffer {
   pickupText: string;
   pickupReference?: string | null;
   pagoElectronico?: boolean;
+  medioPago?: MedioDePago | null;
+  servicio?: Servicio | null;
   passengers: number;
   distanceKm: number;
   etaMinutes: number;
@@ -358,6 +365,8 @@ export function offerFromSocket(push: ApiOffer): OfferedRide {
     pickupText: push.pickupText,
     pickupReference: push.pickupReference ?? undefined,
     pagoElectronico: push.pagoElectronico ?? false,
+    medioPago: push.medioPago ?? undefined,
+    servicio: push.servicio ?? undefined,
     distanceKm: push.distanceKm,
     etaMinutes: push.etaMinutes,
     passengers: push.passengers,
@@ -382,6 +391,8 @@ export function offerFromRide(ride: ApiRide): OfferedRide {
     pickupSource: ride.pickupSource ?? undefined,
     pickupLink: ride.pickupLink ?? undefined,
     pagoElectronico: ride.pagoElectronico ?? false,
+    medioPago: ride.medioPago ?? undefined,
+    servicio: ride.servicio ?? undefined,
     distanceKm: 0,
     etaMinutes: ride.etaMinutes ?? 0,
     passengers: ride.passengers,

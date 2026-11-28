@@ -184,7 +184,7 @@ async function main(): Promise<void> {
         [primera.id],
       )
     ).rows[0];
-    assert(paso?.note?.includes('canceló por fuerza mayor') === true, `la bitácora lo cuenta: «${paso?.note}»`, paso);
+    assert(paso?.note?.includes('canceló: ') === true && paso.note.includes('Se busca otro taxi') === true, `la bitácora lo cuenta: «${paso?.note}»`, paso);
 
     const evento = (
       await pool.query<{ payload: Record<string, unknown> }>(
@@ -222,6 +222,8 @@ async function main(): Promise<void> {
       )
     ).rows[0]?.payload as { driver?: { name?: string; plate?: string } } | undefined;
     assert(Boolean(reasignada?.driver?.plate), `el cliente recibe «le asignamos otro taxi», con la placa ${reasignada?.driver?.plate}`, reasignada);
+    // Desde el 27/11/2026 «el cliente no aparece» solo vale con el taxi en el punto.
+    await call(`/v1/driver/rides/${primera.id}/arrived`, { token: tokenOtro, body: { at: CENTRO } });
     await call(`/v1/driver/rides/${primera.id}/cancel`, { token: tokenOtro, body: { motivo: 'cliente_no_aparece' } });
     await call('/v1/driver/shift/close', { method: 'POST', token: tokenOtro });
 

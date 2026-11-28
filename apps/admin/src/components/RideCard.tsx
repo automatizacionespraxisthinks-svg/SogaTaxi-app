@@ -1,7 +1,7 @@
 import { motion } from 'motion/react';
 import { Clock, CreditCard, MapPin, User } from 'lucide-react';
 import type { Driver, Ride } from '@tax/shared';
-import { RIDE_STATUS_LABEL, RIDE_STATUS_TONE, formatRelative } from '@tax/shared';
+import { RIDE_STATUS_LABEL, RIDE_STATUS_TONE, formatRelative, resumenDeExigencias } from '@tax/shared';
 import { StatusPill, cn, spring, staggerItem } from '@tax/ui';
 
 export function RideCard({
@@ -58,10 +58,10 @@ export function RideCard({
         ) : null}
         {/* Solo el electrónico se marca: el efectivo es lo de siempre, y
             marcarlo en todas las tarjetas sería ruido. */}
-        {ride.pagoElectronico ? (
+        {resumenDeExigencias(ride) ? (
           <span className="inline-flex items-center gap-1 font-medium text-brand-ink">
             <CreditCard className="size-3" />
-            Pago electrónico
+            {resumenDeExigencias(ride)}
           </span>
         ) : null}
       </div>

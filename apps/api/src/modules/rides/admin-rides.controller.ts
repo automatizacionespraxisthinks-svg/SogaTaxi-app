@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -13,13 +14,31 @@ import {
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RIDE_STATUSES, crearCarreraOficinaSchema, pointSchema, type RideStatus } from '@tax/shared';
+import {
+  MEDIOS_DE_PAGO_ACEPTADOS,
+  RIDE_STATUSES,
+  crearCarreraOficinaSchema,
+  pointSchema,
+  telefonoColombiano,
+  type MedioDePago,
+  type RideStatus,
+} from '@tax/shared';
 import { zodBody } from '../../common/zod.pipe';
 import { AppError } from '../../common/problem';
 import { RequierePermiso, SessionGuard } from '../identity/guards';
 import { LINEA_OFICINA, RidesService, type Actor } from './rides.service';
 import { DispatchService } from '../dispatch/dispatch.service';
 import { FotosService } from './fotos.service';
+
+const ubicarSchema = z.object({ text: z.string().trim().min(3).max(200) });
+
+const clienteSchema = z.object({
+  telefono: z
+    .string()
+    .trim()
+    .transform((v) => telefonoColombiano(v))
+    .refine((v) => /^\+\d{8,15}$/.test(v), 'Escribe el celular completo'),
+});
 
 const listQuerySchema = z.object({
   status: z
@@ -42,7 +61,18 @@ const addressSchema = z.object({
 
 const cancelSchema = z.object({ reason: z.string().min(3, 'El motivo es obligatorio') });
 const assignSchema = z.object({ driverId: z.string().uuid() });
-const pagoSchema = z.object({ pagoElectronico: z.boolean() });
+/**
+ * El medio de pago nuevo: el exacto (`medioPago`) o, de un cliente sin
+ * actualizar, la marca de antes (`pagoElectronico`).
+ */
+const pagoSchema = z
+  .object({
+    pagoElectronico: z.boolean().optional(),
+    medioPago: z.enum(MEDIOS_DE_PAGO_ACEPTADOS).optional(),
+  })
+  .refine((v) => v.medioPago !== undefined || v.pagoElectronico !== undefined, 'Falta el medio de pago');
+const medioDe = (body: { pagoElectronico?: boolean; medioPago?: MedioDePago }): MedioDePago =>
+  body.medioPago ?? (body.pagoElectronico ? 'electronico' : 'efectivo');
 
 /**
  * Carreras vistas desde el panel de oficina.
@@ -79,6 +109,27 @@ export class AdminRidesController {
       { ...body, numeroEnPedido: 1, line: LINEA_OFICINA },
       operator(request),
     );
+  }
+
+  /**
+   * Dónde queda la dirección que la operadora está escribiendo, para que el
+   * mapa de «Nueva carrera» la muestre con los taxis del sector antes de
+   * crear nada. `null` si Google no la ubica: no es un error, la carrera se
+   * puede crear igual.
+   */
+  @Post('ubicar')
+  @HttpCode(200)
+  @RequierePermiso('carreras.crear')
+  async ubicar(@Body(zodBody(ubicarSchema)) body: z.infer<typeof ubicarSchema>) {
+    return { hallada: await this.rides.ubicarParaLaOficina(body.text) };
+  }
+
+  /** El cliente que llama, por su celular: nombre y últimas recogidas. */
+  @Post('cliente')
+  @HttpCode(200)
+  @RequierePermiso('carreras.crear')
+  async cliente(@Body(zodBody(clienteSchema)) body: z.infer<typeof clienteSchema>) {
+    return { cliente: await this.rides.clienteParaLaOficina(body.telefono) };
   }
 
   @Get()
@@ -118,7 +169,7 @@ export class AdminRidesController {
     @Param('rideId', ParseUUIDPipe) rideId: string,
     @Body(zodBody(pagoSchema)) body: z.infer<typeof pagoSchema>,
   ) {
-    return this.rides.cambiarMedioDePago(rideId, body.pagoElectronico, operator(request));
+    return this.rides.cambiarMedioDePago(rideId, medioDe(body), operator(request));
   }
 
   @Post(':rideId/cancel')

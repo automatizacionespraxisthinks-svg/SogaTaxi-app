@@ -1,5 +1,5 @@
 import { relations, sql } from 'drizzle-orm';
-import type { WaveLogEntry } from '@tax/shared';
+import type { MedioDePago, Servicio, WaveLogEntry } from '@tax/shared';
 import {
   boolean,
   doublePrecision,
@@ -16,6 +16,7 @@ import {
 import { drivers, vehicles } from './fleet';
 import { bytea } from './bytea';
 import { zones } from './geo';
+import { users } from './identity';
 import { offerResponse, rideStatus, transitionActor, vehicleType } from './enums';
 
 /**
@@ -121,6 +122,15 @@ export const rides = pgTable(
      * conductores que lo aceptan (`drivers.acepta_pago_electronico`).
      */
     pagoElectronico: boolean('pago_electronico').notNull().default(false),
+    /**
+     * El medio exacto (27/11/2026): `efectivo`, `nequi`, `daviplata`,
+     * `llave`, o `electronico` para las carreras que solo dijeron «pago
+     * electrónico». `pago_electronico` sigue al día: verdadero si no es
+     * efectivo.
+     */
+    medioPago: text('medio_pago').$type<MedioDePago>().notNull().default('efectivo'),
+    /** Mascotas, licorera o cables de inicio; nulo en una carrera corriente. */
+    servicio: text('servicio').$type<Servicio>(),
 
     /** Pesos colombianos, sin decimales. Siempre «estimada» de cara al
         cliente (Ley 1480). */
@@ -184,6 +194,13 @@ export const rides = pgTable(
      */
     allowsConcurrent: boolean('allows_concurrent').notNull().default(false),
 
+    /**
+     * La persona de la oficina que la registró desde «Nueva carrera»
+     * (28/11/2026). Nulo en las que entraron por WhatsApp. Con esto la
+     * sección Operadoras cuenta cuántas despachó cada una.
+     */
+    createdBy: uuid('created_by').references(() => users.id),
+
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     assignedAt: timestamp('assigned_at', { withTimezone: true }),
     arrivedAt: timestamp('arrived_at', { withTimezone: true }),
@@ -196,6 +213,9 @@ export const rides = pgTable(
     index('rides_status_idx').on(table.status, table.createdAt),
     index('rides_driver_idx').on(table.driverId),
     index('rides_customer_idx').on(table.customerId, table.createdAt),
+    index('rides_created_by_idx')
+      .on(table.createdBy, table.createdAt)
+      .where(sql`${table.createdBy} is not null`),
 
     /**
      * Respaldo estructural de la exclusividad (§5.1): un conductor no puede

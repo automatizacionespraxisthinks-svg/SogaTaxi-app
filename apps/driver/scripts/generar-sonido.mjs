@@ -5,10 +5,10 @@
 //   node apps/driver/scripts/generar-sonido.mjs
 //
 // Escribe, a 44,1 kHz, 16 bits, mono:
-//   - apps/driver/public/oferta.wav                       (una vez, ~2,4 s; la PWA)
+//   - apps/driver/public/oferta.wav                       (una vez, 3 s; la PWA)
 //   - apps/conductor-android/app/src/main/res/raw/oferta_sogataxi.wav  (Android, en bucle)
 //   - apps/conductor-android/iosApp/iosApp/Recursos/oferta.wav         (iPhone: repetido
-//     hasta ~28 s, porque iOS solo deja sonidos de notificación de menos de 30 s)
+//     hasta 27 s, porque iOS solo deja sonidos de notificación de menos de 30 s)
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -16,7 +16,9 @@ import { fileURLToPath } from 'node:url';
 
 const RAIZ = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const FS = 44100;
-const DURACION = 2.4; // segundos de una vuelta: sonido + silencio antes de repetir
+// Segundos de una vuelta. Tres desde el 28/11/2026: la empresa pidió un segundo
+// más que los dos de antes, y se llenan con un segundo «pi-pi», no con silencio.
+const DURACION = 3;
 
 const muestras = new Float32Array(Math.round(DURACION * FS));
 
@@ -83,13 +85,15 @@ function campana(inicio, frecuencia, largo, volumen) {
 
 bocina(0.0, 0.16); // pi
 bocina(0.26, 0.3); // piii
+bocina(0.88, 0.16); // pi
+bocina(1.14, 0.3); // piii
 
-// Remate ascendente: sol5, do6, mi6 y un sol6 que queda sonando.
+// Remate ascendente: sol5, do6, mi6 y un sol6 que queda sonando hasta el final.
 const remate = [
-  [0.78, 784, 0.5, 0.32],
-  [0.9, 1047, 0.5, 0.32],
-  [1.02, 1319, 0.5, 0.32],
-  [1.14, 1568, 1.1, 0.4],
+  [1.66, 784, 0.5, 0.32],
+  [1.78, 1047, 0.5, 0.32],
+  [1.9, 1319, 0.5, 0.32],
+  [2.02, 1568, 0.98, 0.4],
 ];
 remate.forEach(([t, f, largo, vol]) => campana(t, f, largo, vol));
 
@@ -133,8 +137,8 @@ function escribir(relativa, datos) {
 escribir('apps/driver/public/oferta.wav', muestras);
 escribir('apps/conductor-android/app/src/main/res/raw/oferta_sogataxi.wav', muestras);
 
-// iPhone: 11 vueltas = 26,4 s, por debajo del tope de 30 s de iOS.
-const vueltas = 11;
+// iPhone: 9 vueltas = 27 s, por debajo del tope de 30 s de iOS.
+const vueltas = 9;
 const largoIos = new Float32Array(muestras.length * vueltas);
 for (let v = 0; v < vueltas; v++) largoIos.set(muestras, v * muestras.length);
 escribir('apps/conductor-android/iosApp/iosApp/Recursos/oferta.wav', largoIos);

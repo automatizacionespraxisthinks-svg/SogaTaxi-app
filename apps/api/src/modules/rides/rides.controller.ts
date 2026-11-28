@@ -13,7 +13,14 @@ import {
 } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RIDE_STATUSES, createRideSchema, pointSchema, type RideStatus } from '@tax/shared';
+import {
+  MEDIOS_DE_PAGO_ACEPTADOS,
+  RIDE_STATUSES,
+  createRideSchema,
+  pointSchema,
+  type MedioDePago,
+  type RideStatus,
+} from '@tax/shared';
 import { zodBody } from '../../common/zod.pipe';
 import { AppError } from '../../common/problem';
 import { HuellaDeIdempotencia, IdempotencyInterceptor } from '../../common/idempotency.interceptor';
@@ -44,7 +51,19 @@ const cancelSchema = z.object({
   reason: z.string().min(3, 'El motivo es obligatorio'),
 });
 
-const pagoSchema = z.object({ pagoElectronico: z.boolean(), relanzar: z.boolean().optional() });
+/**
+ * El medio de pago nuevo: el exacto (`medioPago`) o, de un cliente sin
+ * actualizar, la marca de antes (`pagoElectronico`).
+ */
+const pagoSchema = z
+  .object({
+    pagoElectronico: z.boolean().optional(),
+    medioPago: z.enum(MEDIOS_DE_PAGO_ACEPTADOS).optional(),
+    relanzar: z.boolean().optional(),
+  })
+  .refine((v) => v.medioPago !== undefined || v.pagoElectronico !== undefined, 'Falta el medio de pago');
+const medioDe = (body: { pagoElectronico?: boolean; medioPago?: MedioDePago }): MedioDePago =>
+  body.medioPago ?? (body.pagoElectronico ? 'electronico' : 'efectivo');
 
 /**
  * Lo que identifica un pedido de taxi: quién lo pide y, si compartió su
@@ -162,7 +181,7 @@ export class RidesController {
     @Param('rideId', ParseUUIDPipe) rideId: string,
     @Body(zodBody(pagoSchema)) body: z.infer<typeof pagoSchema>,
   ) {
-    const ride = await this.rides.cambiarMedioDePago(rideId, body.pagoElectronico, actorFrom(request, 'customer'));
+    const ride = await this.rides.cambiarMedioDePago(rideId, medioDe(body), actorFrom(request, 'customer'));
     if (!body.relanzar) return ride;
     // Relanzar es un acto de operador (§5.3), como en `/redispatch`.
     await this.dispatch.redispatch(rideId, actorFrom(request, 'operator'));

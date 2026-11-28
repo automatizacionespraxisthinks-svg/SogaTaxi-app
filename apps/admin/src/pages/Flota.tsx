@@ -2,8 +2,10 @@ import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Ban, Car, CreditCard, Search, ShieldAlert, SignalLow, UserX } from 'lucide-react';
-import type { Driver, FilaConductorInforme, MovilVinculado } from '@tax/shared';
+import type { Capacidad as CapacidadDelConductor, Driver, FilaConductorInforme, MovilVinculado } from '@tax/shared';
+import { CAPACIDAD_LABEL, esMedioElectronico } from '@tax/shared';
 import {
+  DIAS_DE_AVISO_DE_VENCIMIENTO,
   DRIVER_STATUS_LABEL,
   DRIVER_STATUS_TONE,
   VEHICLE_TYPE_LABEL,
@@ -302,7 +304,7 @@ function DriverCard({
 
       {(!driver.active ||
         driver.suspendidoHasta ||
-        driver.aceptaPagoElectronico ||
+        (driver.capacidades?.length ?? 0) > 0 ||
         stale ||
         !driver.deviceRegistered ||
         driver.vehicle.active === false ||
@@ -311,7 +313,9 @@ function DriverCard({
         <div className="mt-2.5 flex flex-wrap gap-1.5">
           {!driver.active ? <Desactivado /> : null}
           {driver.suspendidoHasta ? <Suspendido hasta={driver.suspendidoHasta} /> : null}
-          {driver.aceptaPagoElectronico ? <PagoElectronico /> : null}
+          {(driver.capacidades ?? []).map((c) => (
+            <Capacidad key={c} cual={c} />
+          ))}
           {stale ? <Alert>Sin GPS reciente</Alert> : null}
           {!driver.deviceRegistered ? <Alert>Dispositivo sin registrar</Alert> : null}
           {driver.vehicle.active === false ? <Alert>Vehículo inactivo</Alert> : null}
@@ -358,12 +362,18 @@ function Suspendido({ hasta }: { hasta: string }) {
   );
 }
 
-/** Recibe pagos electrónicos: un dato, no una alerta, y en el tono de marca. */
-function PagoElectronico() {
+/**
+ * Un medio de pago que recibe o un servicio que presta: un dato, no una
+ * alerta. Los pagos en el tono de marca; los servicios en neutro.
+ */
+function Capacidad({ cual }: { cual: CapacidadDelConductor }) {
+  const esPago = esMedioElectronico(cual);
   return (
-    <span className="tone-info inline-flex items-center gap-1 rounded-full border border-[var(--tone-line)] bg-[var(--tone-bg)] px-2 py-0.5 text-micro text-[var(--tone-ink)]">
-      <CreditCard className="size-3" />
-      Pago electrónico
+    <span
+      className={`${esPago ? 'tone-info' : 'tone-neutral'} inline-flex items-center gap-1 rounded-full border border-[var(--tone-line)] bg-[var(--tone-bg)] px-2 py-0.5 text-micro text-[var(--tone-ink)]`}
+    >
+      {esPago ? <CreditCard className="size-3" /> : null}
+      {CAPACIDAD_LABEL[cual]}
     </span>
   );
 }
@@ -417,7 +427,13 @@ function DriverDetail({
         <Meta label="Aceptación hoy">
           {hoy?.tasaAceptacion != null ? `${Math.round(hoy.tasaAceptacion * 100)} % de ${hoy.ofertas} ofertas` : '—'}
         </Meta>
-        <Meta label="Pago electrónico">{driver.aceptaPagoElectronico ? 'Lo recibe' : 'No lo recibe'}</Meta>
+        <Meta label="Recibe">
+          {['Efectivo', ...(driver.capacidades ?? []).filter(esMedioElectronico).map((c) => CAPACIDAD_LABEL[c])].join(', ')}
+        </Meta>
+        <Meta label="Servicios">
+          {(driver.capacidades ?? []).filter((c) => !esMedioElectronico(c)).map((c) => CAPACIDAD_LABEL[c]).join(', ') ||
+            'Solo carreras'}
+        </Meta>
       </div>
 
       <div>
@@ -481,14 +497,14 @@ const fechaCorta = (dia: string) =>
   new Date(`${dia}T12:00:00Z`).toLocaleDateString('es-CO', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 
 /**
- * La licencia, como la mira la oficina: vencida, por vencer en el mes, o al
+ * La licencia, como la mira la oficina: vencida, por vencer pronto, o al
  * día. Solo avisa; no impide trabajar, que eso lo decide la empresa.
  */
 function estadoLicencia(vence?: string): { texto: string; alerta?: string } {
   if (!vence) return { texto: 'Sin dato en el listado' };
   const dias = Math.floor((Date.parse(`${vence}T23:59:59-05:00`) - Date.now()) / 86_400_000);
   if (dias < 0) return { texto: `Vencida desde el ${fechaCorta(vence)}`, alerta: 'Licencia vencida' };
-  if (dias <= 30) {
+  if (dias <= DIAS_DE_AVISO_DE_VENCIMIENTO) {
     return { texto: `Vence el ${fechaCorta(vence)}`, alerta: dias === 0 ? 'Licencia vence hoy' : `Licencia vence en ${dias} días` };
   }
   return { texto: `Al día, vence el ${fechaCorta(vence)}` };

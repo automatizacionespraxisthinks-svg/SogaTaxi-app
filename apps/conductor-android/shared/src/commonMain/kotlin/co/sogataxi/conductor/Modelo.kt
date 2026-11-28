@@ -28,6 +28,9 @@ data class Carrera(
     /** El enlace de ubicación que mandó el cliente: "Ir con Maps" abre este. */
     val enlace: String? = null,
     val pagoElectronico: Boolean = false,
+    /** El medio exacto ("nequi", "daviplata", "llave") y el servicio, si los hay. */
+    val medioPago: String? = null,
+    val servicio: String? = null,
     val pasajeros: Int = 1,
     val notas: String? = null,
     val cliente: String? = null,
@@ -48,6 +51,8 @@ data class Carrera(
         si("pickupLng", lng)
         si("pickupLink", enlace)
         put("pagoElectronico", pagoElectronico)
+        si("medioPago", medioPago)
+        si("servicio", servicio)
         put("passengers", pasajeros)
         si("notes", notas)
         si("customerName", cliente)
@@ -69,6 +74,8 @@ data class Carrera(
                 lng = if (sinUbicar) null else j.doble("pickupLng"),
                 enlace = j.texto("pickupLink"),
                 pagoElectronico = j.booleano("pagoElectronico"),
+                medioPago = j.texto("medioPago"),
+                servicio = j.texto("servicio"),
                 pasajeros = j.entero("passengers") ?: 1,
                 notas = j.texto("notes"),
                 cliente = j.texto("customerName"),
@@ -97,6 +104,11 @@ data class EstadoSesion(
     val metrosALaRecogida: Int? = null,
     /** Un mensaje para el conductor (una etapa rechazada, la oficina cerró el turno…). */
     val aviso: String? = null,
+    /**
+     * Licencia, SOAT o técnico-mecánica vencidos o por vencer (27/11/2026).
+     * Los dice la API al entrar; no se guardan: sin señal no se inventan.
+     */
+    val documentos: List<AvisoDeDocumento> = emptyList(),
 ) {
     /** Lo que se guarda para abrir sin señal donde estaba. Una oferta no: sin señal no se acepta. */
     fun aJson(): JsonObject = buildJsonObject {
@@ -136,3 +148,27 @@ object Posicion {
     @kotlin.concurrent.Volatile
     var ultima: Pair<Double, Double>? = null
 }
+
+/**
+ * Con qué paga el cliente, en palabras (27/11/2026). Con el medio exacto
+ * cuando la API lo manda; de una API sin actualizar solo llega la marca de
+ * antes, "pago electrónico" sin decir cuál.
+ */
+fun textoDelPago(electronico: Boolean, medio: String?): String = when (medio) {
+    "efectivo" -> "Efectivo"
+    "nequi" -> "Nequi"
+    "daviplata" -> "Daviplata"
+    "llave" -> "Llave"
+    else -> if (electronico) "Pago electrónico" else "Efectivo"
+}
+
+/** El servicio de la carrera, si no es una carrera corriente. */
+fun textoDelServicio(servicio: String?): String? = when (servicio) {
+    "mascotas" -> "Lleva mascota"
+    "licorera" -> "Domicilio de licorera"
+    "cables" -> "Cables de inicio"
+    else -> null
+}
+
+/** Un documento vencido o por vencer, como lo manda `/v1/driver/rides/me` en `avisos`. */
+data class AvisoDeDocumento(val texto: String, val vencido: Boolean, val bloquea: Boolean)

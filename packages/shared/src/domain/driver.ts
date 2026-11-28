@@ -1,3 +1,4 @@
+import type { Capacidad } from './capacidades';
 import type { Point } from './geo';
 import type { VehicleType } from './ride';
 
@@ -48,6 +49,8 @@ export interface Driver {
   esPrueba?: boolean;
   /** Recibe pagos electrónicos: solo a estos les llegan las carreras que se pagan así. */
   aceptaPagoElectronico?: boolean;
+  /** Los medios de pago que recibe y los servicios que presta. */
+  capacidades?: Capacidad[];
   /**
    * Suspendido por el reglamento interno hasta esta fecha (ISO). Solo viene
    * mientras la suspensión sigue en pie; una ya cumplida no se manda.

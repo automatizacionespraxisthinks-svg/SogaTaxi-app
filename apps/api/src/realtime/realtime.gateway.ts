@@ -1,3 +1,4 @@
+import type { MedioDePago, Servicio } from '@tax/shared';
 import type { WaveLogEntry } from '@tax/shared';
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import {
@@ -21,6 +22,9 @@ export interface OfferPush {
    * dirección de recogida.
    */
   pagoElectronico: boolean;
+  /** El medio exacto y el servicio (27/11/2026); una app vieja los ignora. */
+  medioPago?: MedioDePago;
+  servicio?: Servicio | null;
   passengers: number;
   distanceKm: number;
   etaMinutes: number;

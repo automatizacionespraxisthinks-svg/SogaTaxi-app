@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { VEHICLE_TYPES, fechaIsoValida, suspensionSchema, type Suspension } from '@tax/shared';
+import { CAPACIDADES, VEHICLE_TYPES, fechaIsoValida, suspensionSchema, type Suspension } from '@tax/shared';
 import { zodBody } from '../../common/zod.pipe';
 import { RequierePermiso, SessionGuard } from '../identity/guards';
 import { FleetService } from './fleet.service';
@@ -24,6 +24,8 @@ const nuevoConductorSchema = z.object({
   code: z.string().trim().min(1).max(10).regex(/^[0-9]+$/, 'El código es numérico'),
   name: z.string().trim().min(3).max(120),
   phone: z.string().trim().regex(/^\+\d{8,15}$/, 'Teléfono en formato E.164, por ejemplo +573001234567'),
+  /** La cédula, si se tiene a mano al darlo de alta; se puede completar después. */
+  cedula: z.string().trim().regex(/^\d{6,10}$/, 'La cédula son entre 6 y 10 dígitos, sin puntos').optional(),
   /** Los vehículos que podrá manejar (18/11/2026); es lo que manda el panel. */
   vehicleIds: z.array(z.string().uuid()).max(100).optional(),
   /** La forma de antes: una placa que crea el vehículo si no existe. */
@@ -75,6 +77,8 @@ const cambiosSchema = z
     esPrueba: z.boolean().optional(),
     /** Recibe pagos electrónicos: solo a estos les llegan esas carreras. */
     aceptaPagoElectronico: z.boolean().optional(),
+    /** Medios de pago que recibe y servicios que presta: la lista completa. */
+    capacidades: z.array(z.enum(CAPACIDADES)).max(CAPACIDADES.length).optional(),
     cedula: z.string().trim().regex(/^\d{6,10}$/, 'La cédula son entre 6 y 10 dígitos, sin puntos').optional(),
     licenseExpiresOn: fecha.nullable().optional(),
     licenseRestriction: z.string().trim().max(120).nullable().optional(),
@@ -193,6 +197,17 @@ export class AdminFleetController {
     @Body(zodBody(vehiculosPermitidosSchema)) body: z.infer<typeof vehiculosPermitidosSchema>,
   ) {
     return this.admin.fijarVehiculos(driverId, body.vehicleIds, actorDe(request));
+  }
+
+  /**
+   * La cédula de un conductor (28/11/2026). No viaja con el listado de la
+   * flota, que lo lee cualquier operador cada pocos segundos: se pide aparte,
+   * al abrir la ficha, y solo quien puede gestionar conductores.
+   */
+  @Get(':driverId/cedula')
+  @RequierePermiso('conductores.gestionar')
+  async cedula(@Param('driverId', ParseUUIDPipe) driverId: string) {
+    return { cedula: await this.admin.cedulaDe(driverId) };
   }
 
   /** Si tiene turno abierto: la oficina lo mira antes de desactivarlo. */

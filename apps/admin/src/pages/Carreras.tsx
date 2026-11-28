@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import { AnimatePresence, motion } from 'motion/react';
@@ -25,7 +25,7 @@ import {
 import { useExportar } from '../api/exportaciones';
 import { usePuede } from '../api/queries';
 import { RideDetail } from '../components/RideDetail';
-import { useLive } from '../live/store';
+import { loadRideDetail, useLive } from '../live/store';
 
 type Filter = 'activas' | 'todas' | 'sin-asignar' | 'finalizadas' | 'canceladas';
 
@@ -107,6 +107,11 @@ export function Carreras() {
   }, [rides, active, zoneId, query]);
 
   const selected = rides.find((r) => r.id === rideId) ?? null;
+  // Una carrera antigua abierta por su enlace (desde Operadoras, o uno
+  // guardado) no está entre las recientes: se trae por su código.
+  useEffect(() => {
+    if (rideId && !selected) void loadRideDetail(rideId).catch(() => undefined);
+  }, [rideId, selected]);
 
   return (
     <div className="space-y-4 p-5">

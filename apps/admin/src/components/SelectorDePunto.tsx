@@ -215,6 +215,9 @@ export function SelectorDePunto({
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault();
+              // Que no suba: en un formulario con «Enter crea», este Enter
+              // creaba la carrera antes de que el punto pegado se aplicara.
+              e.stopPropagation();
               usarPegado();
             }
           }}

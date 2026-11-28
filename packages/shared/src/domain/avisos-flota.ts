@@ -7,8 +7,12 @@
  * operación: una licencia por vencer no es urgente como una carrera sin taxi.
  */
 
-/** Con cuántos días de anticipación se avisa un vencimiento. */
-export const DIAS_DE_AVISO_DE_VENCIMIENTO = 30;
+/**
+ * Con cuántos días de anticipación se avisa un vencimiento. Eran 30; la empresa
+ * los pidió a 15 (27/11/2026): con un mes el aviso llegaba tan temprano que se
+ * dejaba pasar.
+ */
+export const DIAS_DE_AVISO_DE_VENCIMIENTO = 15;
 
 export type ClaseDeAvisoDeFlota =
   | 'licencia_vencida'
@@ -16,7 +20,10 @@ export type ClaseDeAvisoDeFlota =
   | 'soat_vencido'
   | 'soat_por_vencer'
   | 'tecnomecanica_vencida'
-  | 'tecnomecanica_por_vencer';
+  | 'tecnomecanica_por_vencer'
+  /** Un campo adicional de tipo fecha que definió la oficina (tarjeta de operación…). */
+  | `extra_vencido:${string}`
+  | `extra_por_vencer:${string}`;
 
 export interface AvisoDeFlota {
   /** Id del conductor o del vehículo. */

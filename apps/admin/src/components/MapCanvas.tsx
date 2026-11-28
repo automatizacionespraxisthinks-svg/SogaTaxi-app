@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { Point } from '@tax/shared';
 import {
   GeoJSONSource,
   Map as MapLibreMap,
@@ -12,6 +13,7 @@ import { DRIVER_STATUS_LABEL, RIDE_STATUS_LABEL, RIDE_STATUS_TONE } from '@tax/s
 import { cn } from '@tax/ui';
 import { useLive } from '../live/store';
 import { CENTRO_DEL_MAPA, TILES_URL, buildStyle, readPalette, registerPmtiles, token } from '../map/style';
+import { colorDelTaxi, rotulo } from '../map/taxis';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 /**
@@ -65,13 +67,22 @@ function iconoPersona(): ImageData {
   return ctx.getImageData(0, 0, lado, lado);
 }
 
-/** Disponible verde, en carrera amarillo, en pausa naranja: lo mismo que en Flota. */
-const DRIVER_TONE: Record<Driver['status'], string> = {
-  AVAILABLE: 'positive',
-  ON_RIDE: 'progress',
-  PAUSED: 'warning',
-  OFF_SHIFT: 'neutral',
-};
+
+/*
+ * El deslizamiento (27/11/2026). El teléfono reporta cada 2 s: pintado tal
+ * cual, el taxi salta de un punto al siguiente. Aquí cada punto recorre el
+ * tramo durante casi todo ese intervalo, así que se ve rodar. Un tramo
+ * larguísimo no es un taxi andando sino el GPS que se reubicó: ese salta.
+ */
+const DESLIZAMIENTO_MS = 1800;
+/** Lo que dura un cuadro del deslizamiento: 20 por segundo. */
+const CUADRO_MS = 50;
+const SALTO_MAXIMO_GRADOS = 0.005; // unos 500 m
+interface Tramo {
+  de: Point;
+  a: Point;
+  inicio: number;
+}
 
 /*
  * Pasajero a bordo (21/11/2026): con la carrera en curso, el cliente va en el
@@ -107,8 +118,9 @@ function driversToGeoJson(drivers: Driver[], ocultos: Set<string> = new Set()): 
           code: driver.code,
           name: driver.name,
           plate: driver.vehicle.plate,
+          rotulo: rotulo(driver),
           estado: DRIVER_STATUS_LABEL[driver.status],
-          color: toneColor(DRIVER_TONE[driver.status]),
+          color: colorDelTaxi(driver.status),
           enCarrera: driver.status === 'ON_RIDE',
           // Una posición vieja no sirve para prometer un ETA (§5.2): se
           // dibuja apagada para que el operador no cuente con ella.
@@ -158,7 +170,7 @@ function ridesToGeoJson(
             ride.status === 'NOTIFIED' || ride.status === 'UNASSIGNED' || ride.status === 'PENDING',
           seleccionada: ride.id === selectedId,
           aBordo: enElTaxi.has(ride.id),
-          borde: enElTaxi.has(ride.id) ? toneColor(DRIVER_TONE.ON_RIDE) : token('--c-surface'),
+          borde: enElTaxi.has(ride.id) ? colorDelTaxi('ON_RIDE') : token('--c-surface'),
         },
       })),
   };
@@ -373,18 +385,40 @@ export function MapCanvas({ rides, selectedRideId, onSelectRide, className }: Ma
         type: 'circle',
         source: 'conductores',
         filter: ['get', 'enCarrera'],
-        paint: { 'circle-radius': 12, 'circle-color': ['get', 'color'], 'circle-opacity': 0.16 },
+        paint: { 'circle-radius': 14, 'circle-color': ['get', 'color'], 'circle-opacity': 0.18 },
       });
+      // Crecen con el acercamiento: de lejos no se tapan, de cerca se ven bien.
       instance.addLayer({
         id: 'conductores',
         type: 'circle',
         source: 'conductores',
         paint: {
-          'circle-radius': 5,
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 4.5, 14, 7, 17, 10],
           'circle-color': ['get', 'color'],
           'circle-opacity': ['case', ['get', 'vieja'], 0.4, 1],
           'circle-stroke-color': colors.surface,
           'circle-stroke-width': 2.5,
+          'circle-stroke-opacity': ['case', ['get', 'vieja'], 0.6, 1],
+        },
+      });
+      // El número del móvil, de cerca: de lejos serían letras encimadas.
+      instance.addLayer({
+        id: 'conductores-rotulo',
+        type: 'symbol',
+        source: 'conductores',
+        minzoom: 13.5,
+        layout: {
+          'text-field': ['get', 'rotulo'],
+          'text-font': ['Noto Sans Regular'],
+          'text-size': 11,
+          'text-offset': [0, 1.25],
+          'text-anchor': 'top',
+          'text-optional': true,
+        },
+        paint: {
+          'text-color': colors.ink,
+          'text-halo-color': colors.surface,
+          'text-halo-width': 1.6,
         },
       });
 
@@ -477,30 +511,61 @@ export function MapCanvas({ rides, selectedRideId, onSelectRide, className }: Ma
     publish('zonas', zonesGeoJson);
   }, [zonesGeoJson, ready]);
 
-  // Las carreras en curso, con la posición en vivo del taxi que las lleva.
-  const enElTaxi = useMemo(() => aBordo(rides, drivers), [rides, drivers]);
+  /*
+   * Lo que se mueve —taxis, el cliente que va a bordo y la línea hacia la
+   * recogida— lo pinta una sola función, fuera de React: mientras algún taxi
+   * se desliza corre una vez por cuadro, y cuando todos llegan se detiene.
+   */
+  const datos = useRef({ rides, drivers, selectedRideId });
+  datos.current = { rides, drivers, selectedRideId };
+  const tramos = useRef(new Map<string, Tramo>());
+  const destinos = useRef(new Map<string, Point>());
+  const mostrados = useRef(new Map<string, Point>());
+  const cuadro = useRef(0);
+  const ultimoCuadro = useRef(0);
+  const hayRuta = useRef(false);
 
-  useEffect(() => {
+  /** Pinta un cuadro. Devuelve si algún taxi sigue en camino. */
+  const pintar = (ahora: number, todo: boolean): boolean => {
+    const { rides, drivers, selectedRideId } = datos.current;
+    let enCamino = false;
+
+    const visibles = drivers.map((driver) => {
+      if (!driver.position) return driver;
+      const tramo = tramos.current.get(driver.id);
+      if (!tramo) {
+        mostrados.current.set(driver.id, driver.position);
+        return driver;
+      }
+      const k = Math.min(1, (ahora - tramo.inicio) / DESLIZAMIENTO_MS);
+      const punto = {
+        lat: tramo.de.lat + (tramo.a.lat - tramo.de.lat) * k,
+        lng: tramo.de.lng + (tramo.a.lng - tramo.de.lng) * k,
+      };
+      mostrados.current.set(driver.id, punto);
+      if (k < 1) enCamino = true;
+      else tramos.current.delete(driver.id);
+      return { ...driver, position: punto };
+    });
+
+    // Las carreras en curso, con la posición en vivo del taxi que las lleva.
+    const enElTaxi = aBordo(rides, visibles);
     const llevanPasajero = new Set(
       rides.filter((r) => enElTaxi.has(r.id) && r.driverId).map((r) => r.driverId!),
     );
-    publish('conductores', driversToGeoJson(drivers, llevanPasajero));
-  }, [drivers, rides, enElTaxi, ready]);
+    publish('conductores', driversToGeoJson(visibles, llevanPasajero));
+    // Los clientes solo se mueven si van a bordo: sin ninguno, no se repintan.
+    if (todo || enElTaxi.size > 0) publish('pines', ridesToGeoJson(rides, selectedRideId, enElTaxi));
 
-  useEffect(() => {
-    publish('pines', ridesToGeoJson(rides, selectedRideId, enElTaxi));
-  }, [rides, selectedRideId, enElTaxi, ready]);
-
-  /** Línea entre el conductor asignado y el punto de recogida. */
-  useEffect(() => {
+    /* Línea entre el conductor asignado y el punto de recogida. */
     const ride = rides.find((r) => r.id === selectedRideId);
-    const driver = ride?.driverId ? drivers.find((d) => d.id === ride.driverId) : undefined;
-
+    const driver = ride?.driverId ? visibles.find((d) => d.id === ride.driverId) : undefined;
     if (!ride?.pickup.point || ride.pickupSource === 'sin_ubicar' || !driver?.position) {
-      publish('ruta', EMPTY);
-      return;
+      if (todo || hayRuta.current) publish('ruta', EMPTY);
+      hayRuta.current = false;
+      return enCamino;
     }
-
+    hayRuta.current = true;
     publish('ruta', {
       type: 'FeatureCollection',
       features: [
@@ -519,7 +584,54 @@ export function MapCanvas({ rides, selectedRideId, onSelectRide, className }: Ma
         },
       ],
     });
-  }, [rides, drivers, selectedRideId, ready]);
+    return enCamino;
+  };
+
+  useEffect(() => {
+    // Qué taxis cambiaron de sitio desde la última tanda: esos se deslizan.
+    const ahora = performance.now();
+    const vivos = new Set<string>();
+    for (const driver of drivers) {
+      if (!driver.position) continue;
+      vivos.add(driver.id);
+      const destino = destinos.current.get(driver.id);
+      if (destino && destino.lat === driver.position.lat && destino.lng === driver.position.lng) continue;
+      destinos.current.set(driver.id, driver.position);
+      const desde = mostrados.current.get(driver.id);
+      if (
+        !desde ||
+        Math.abs(desde.lat - driver.position.lat) > SALTO_MAXIMO_GRADOS ||
+        Math.abs(desde.lng - driver.position.lng) > SALTO_MAXIMO_GRADOS
+      ) {
+        tramos.current.delete(driver.id);
+      } else {
+        tramos.current.set(driver.id, { de: desde, a: driver.position, inicio: ahora });
+      }
+    }
+    for (const id of [...destinos.current.keys()]) {
+      if (vivos.has(id)) continue;
+      destinos.current.delete(id);
+      tramos.current.delete(id);
+      mostrados.current.delete(id);
+    }
+
+    const seguir = pintar(ahora, true);
+    if (seguir && cuadro.current === 0) {
+      const paso = (t: number) => {
+        // Con toda la flota moviéndose el bucle no para nunca: a 20 cuadros
+        // por segundo el taxi se ve igual de suave y el mapa trabaja un tercio.
+        if (t - ultimoCuadro.current < CUADRO_MS) {
+          cuadro.current = requestAnimationFrame(paso);
+          return;
+        }
+        ultimoCuadro.current = t;
+        cuadro.current = pintar(t, false) ? requestAnimationFrame(paso) : 0;
+      };
+      cuadro.current = requestAnimationFrame(paso);
+    }
+  }, [drivers, rides, selectedRideId, ready]);
+
+  useEffect(() => () => cancelAnimationFrame(cuadro.current), []);
 
   /* -------------------------------------------------------- animaciones --- */
 
@@ -580,7 +692,8 @@ export function MapCanvas({ rides, selectedRideId, onSelectRide, className }: Ma
     let frame = 0;
 
     const tick = (now: number) => {
-      if (now - last > 110) {
+      // Sin ruta a la vista no hay nada que animar: se ahorra el repintado.
+      if (hayRuta.current && now - last > 110) {
         last = now;
         step = (step + 1) % patterns.length;
         if (instance.getLayer('ruta')) {
@@ -642,8 +755,9 @@ export function MapCanvas({ rides, selectedRideId, onSelectRide, className }: Ma
 function Legend() {
   const items = [
     { dot: 'bg-legend-success', label: 'Disponible' },
-    { dot: 'bg-legend-brand', label: 'En carrera' },
+    { dot: 'bg-legend-ride', label: 'En carrera' },
     { dot: 'bg-legend-warning', label: 'En pausa' },
+    { dot: 'bg-legend-success opacity-40', label: 'Sin señal reciente' },
   ];
 
   return (

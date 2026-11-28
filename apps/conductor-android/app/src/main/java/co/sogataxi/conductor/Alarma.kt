@@ -15,8 +15,8 @@ import android.os.VibratorManager
 /**
  * El sonido de una oferta: el de SogaTaxi («pi-pi» de bocina y una
  * campanita, `res/raw/oferta_sogataxi.wav`, hecho con
- * `apps/driver/scripts/generar-sonido.mjs`), con vibración, durante dos
- * segundos. Si el archivo fallara, suena la alarma del teléfono.
+ * `apps/driver/scripts/generar-sonido.mjs`), con vibración, durante tres
+ * segundos (28/11/2026; fueron dos desde el 26/11). Si el archivo fallara, suena la alarma del teléfono.
  *
  * Hasta el 26/11/2026 sonaba en bucle hasta que el conductor contestara o la
  * oferta venciera; con tantas carreras llegando, cansaba. La oferta sigue en
@@ -31,7 +31,7 @@ object Alarma {
     private var vibrador: Vibrator? = null
 
     /** Cuánto suena y vibra cada oferta. */
-    private const val DURACION_MS = 2_000L
+    private const val DURACION_MS = 3_000L
     private val reloj = Handler(Looper.getMainLooper())
     private val alVencer = Runnable { callar() }
 
@@ -41,7 +41,10 @@ object Alarma {
         val propio = Uri.parse("android.resource://${context.packageName}/${R.raw.oferta_sogataxi}")
         val delTelefono = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-        reproductor = reproducir(context, propio) ?: delTelefono?.let { reproducir(context, it) }
+        // El sonido propio dura lo justo y suena una vez; el del teléfono, en
+        // bucle hasta que el reloj lo calle.
+        reproductor = reproducir(context, propio, enBucle = false)
+            ?: delTelefono?.let { reproducir(context, it, enBucle = true) }
 
         vibrador = if (Build.VERSION.SDK_INT >= 31) {
             context.getSystemService(VibratorManager::class.java).defaultVibrator
@@ -49,12 +52,12 @@ object Alarma {
             @Suppress("DEPRECATION")
             context.getSystemService(Vibrator::class.java)
         }
-        // Al ritmo del sonido: dos golpes cortos (la bocina) y uno largo. Una sola vez.
-        vibrador?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 160, 100, 300, 400, 700), -1))
+        // Al ritmo del sonido: los dos «pi-pi» de la bocina y un golpe largo. Una sola vez.
+        vibrador?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 160, 100, 300, 320, 160, 100, 300, 220, 900), -1))
         reloj.postDelayed(alVencer, DURACION_MS)
     }
 
-    private fun reproducir(context: Context, uri: Uri): MediaPlayer? =
+    private fun reproducir(context: Context, uri: Uri, enBucle: Boolean): MediaPlayer? =
         runCatching {
             MediaPlayer().apply {
                 setAudioAttributes(
@@ -64,7 +67,7 @@ object Alarma {
                         .build(),
                 )
                 setDataSource(context, uri)
-                isLooping = true
+                isLooping = enBucle
                 prepare()
                 start()
             }

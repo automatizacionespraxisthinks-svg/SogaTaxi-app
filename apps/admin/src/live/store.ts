@@ -163,7 +163,11 @@ export async function loadRideDetail(rideId: string): Promise<Ride> {
   conDetalle.add(rideId);
   const row = await api.get<ApiRideDetail>(`/v1/admin/rides/${rideId}`);
   const detailed = toRideDetail(row);
-  emit({ rides: state.rides.map((ride) => (ride.id === rideId ? detailed : ride)) });
+  emit({
+    rides: state.rides.some((ride) => ride.id === rideId)
+      ? state.rides.map((ride) => (ride.id === rideId ? detailed : ride))
+      : [...state.rides, detailed],
+  });
   return detailed;
 }
 
@@ -197,13 +201,20 @@ function scheduleRefresh(): void {
  * se pinta una sola vez, con el punto bueno de cada taxi.
  */
 const movimientos = new Map<string, Point>();
+/*
+ * Cada cuánto se aplican (27/11/2026). Antes era una vez por cuadro: con la
+ * flota en la calle, toda la pantalla de Operación se volvía a calcular
+ * decenas de veces por segundo. El mapa ya no lo necesita: desliza cada taxi
+ * por su cuenta entre una posición y la siguiente.
+ */
+const TANDA_DE_MOVIMIENTOS_MS = 400;
 let frameMovimientos: number | undefined;
 
 function encolarMovimiento(driverId: string, point: Point): void {
   movimientos.set(driverId, point);
   if (frameMovimientos !== undefined) return;
 
-  frameMovimientos = window.requestAnimationFrame(() => {
+  frameMovimientos = window.setTimeout(() => {
     frameMovimientos = undefined;
     if (movimientos.size === 0) return;
 
@@ -215,11 +226,11 @@ function encolarMovimiento(driverId: string, point: Point): void {
         return punto ? { ...driver, position: punto, positionAgeSeconds: 0 } : driver;
       }),
     });
-  });
+  }, TANDA_DE_MOVIMIENTOS_MS);
 }
 
 function olvidarMovimientos(): void {
-  if (frameMovimientos !== undefined) window.cancelAnimationFrame(frameMovimientos);
+  if (frameMovimientos !== undefined) window.clearTimeout(frameMovimientos);
   frameMovimientos = undefined;
   movimientos.clear();
 }

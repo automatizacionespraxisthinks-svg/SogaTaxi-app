@@ -275,3 +275,85 @@ export interface OpcionesDeInforme {
   conductores: { id: string; codigo: string; nombre: string; esPrueba: boolean; activo: boolean }[];
   lineas: string[];
 }
+
+/* ------------------------------------------------------------ operadoras --- */
+
+/**
+ * La sección Operadoras (28/11/2026): qué hizo cada persona de la oficina.
+ *
+ * Solo lleva el periodo y si se cuentan las pruebas: aquí no se filtra por
+ * sector ni por conductor, se compara a las personas entre sí.
+ */
+export const filtrosDeOperadorasSchema = z
+  .object({ desde: fecha, hasta: fecha, sinPruebas: siNo.default(true) })
+  .refine((f) => f.desde <= f.hasta, { message: 'El periodo termina antes de empezar', path: ['hasta'] })
+  .refine((f) => diasDelRango(f.desde, f.hasta) <= MAX_DIAS_INFORME, {
+    message: `El periodo puede tener hasta ${MAX_DIAS_INFORME} días`,
+    path: ['desde'],
+  });
+export type FiltrosDeOperadoras = z.infer<typeof filtrosDeOperadorasSchema>;
+
+/** Lo que pasó con un grupo de carreras: suma siempre `creadas`. */
+export interface DestinoDeCarreras {
+  creadas: number;
+  terminadas: number;
+  /** Las canceló el cliente, la oficina o el conductor. */
+  canceladas: number;
+  /** Se quedaron sin taxi: siguen sin asignar o el sistema las cerró por eso. */
+  sinTaxi: number;
+  /** Todavía en curso. */
+  abiertas: number;
+}
+
+export interface FilaOperadora extends DestinoDeCarreras {
+  id: string;
+  nombre: string;
+  /** Con lo que entra al panel. */
+  usuario: string;
+  rol: string;
+  activo: boolean;
+  /** Carreras que le puso a un conductor a mano, las haya creado quien las haya creado. */
+  asignacionesManuales: number;
+  /** Veces que pulsó «Relanzar» en una carrera sin asignar. */
+  relanzamientos: number;
+  /** Carreras que canceló en nombre de la oficina. */
+  cancelacionesHechas: number;
+  /** Mediana, en segundos, de registrar la carrera a que un conductor la acepte. */
+  asignacionP50: number | null;
+  /** Días del periodo en que registró al menos una carrera. */
+  diasConCarreras: number;
+  /** Lo último que hizo en el periodo (ISO), o nulo si no hizo nada. */
+  ultimaActividad: string | null;
+  /** Carreras registradas por hora del día, de 0 a 23. */
+  porHora: number[];
+  /** Carreras registradas por día, en el orden de `fechas`. */
+  porDia: number[];
+}
+
+export interface TableroOperadoras {
+  periodo: { desde: string; hasta: string; dias: number };
+  /** Cada día del periodo, en orden. */
+  fechas: string[];
+  /** Todo lo que registró la oficina, sumadas las operadoras. */
+  oficina: DestinoDeCarreras & {
+    asignacionesManuales: number;
+    relanzamientos: number;
+    cancelacionesHechas: number;
+    porHora: number[];
+    horaPico: { hora: number; carreras: number } | null;
+  };
+  /** Lo que entró por WhatsApp en el mismo periodo, para comparar. */
+  asistente: DestinoDeCarreras;
+  operadoras: FilaOperadora[];
+}
+
+/** Una carrera en la lista de las últimas que registró una operadora. */
+export interface CarreraDeOperadora {
+  id: string;
+  codigo: string;
+  creada: string;
+  recogida: string;
+  estado: string;
+  conductor: string | null;
+  placa: string | null;
+}

@@ -1,3 +1,8 @@
+import { ZONA_HORARIA_LOCAL, conductorPuede, porQueNoPuede, resumenDeExigencias, sancionPorCancelar } from '@tax/shared';
+
+/** «3:45 p. m.», en hora de Sogamoso. */
+const horaLocal = (cuando: Date) =>
+  new Intl.DateTimeFormat('es-CO', { timeZone: ZONA_HORARIA_LOCAL, hour: 'numeric', minute: '2-digit' }).format(cuando);
 import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
@@ -209,7 +214,7 @@ export class DispatchService {
         ride.vehicleType,
         TODOS_EN_EL_RANGO,
         excluidos,
-        ride.pagoElectronico,
+        { medioPago: ride.medioPago, servicio: ride.servicio },
         topeDePosicionSeg,
       );
       const porDistancia = [...disponibles].sort((a, b) => a.distanceKm - b.distanceKm);
@@ -224,8 +229,8 @@ export class DispatchService {
         ride.vehicleType,
         config.candidates,
         excluidos,
-        // Solo entre los que reciben pagos electrónicos, si así se pidió.
-        ride.pagoElectronico,
+        // Solo entre los que reciben ese medio de pago y prestan ese servicio.
+        { medioPago: ride.medioPago, servicio: ride.servicio },
         // La ronda 1 es para quien está de verdad a pocas cuadras: quien
         // lleva demasiado sin reportar posición entra desde la 2. En las
         // demás vale el tope de seguridad.
@@ -407,6 +412,8 @@ export class DispatchService {
       pickupText: ride.pickupText,
       pickupReference: ride.pickupReference,
       pagoElectronico: ride.pagoElectronico,
+      medioPago: ride.medioPago,
+      servicio: ride.servicio,
       passengers: ride.passengers,
       distanceKm: c.distanceKm,
       etaMinutes: c.etaMinutes,
@@ -838,11 +845,14 @@ export class DispatchService {
      * para no buscar el problema donde no está.
      */
     const electronico = ride.pagoElectronico;
-    const conQuien = electronico ? 'conductores con pago electrónico' : 'conductores';
+    // «Nequi · Lleva mascota»: lo que la carrera exige y achica la lista.
+    // En mitad de la frase, «pago electrónico» va en minúscula; «Nequi» no.
+    const exige = resumenDeExigencias(ride).replace(/^Pago electrónico/, 'pago electrónico');
+    const conQuien = exige ? `conductores con ${exige}` : 'conductores';
     const motivo = nadieLaVio
       ? `Ninguna oleada encontró ${conQuien}`
-      : electronico
-        ? 'Nadie con pago electrónico aceptó la carrera'
+      : exige
+        ? `Nadie con ${exige} aceptó la carrera`
         : 'Nadie aceptó la carrera';
 
     /*
@@ -876,7 +886,13 @@ export class DispatchService {
           ? {
               event: {
                 type: 'ride.no_driver' as const,
-                payload: { pagoElectronico: electronico, relanzamiento: true, intento: ride.intentoDespacho },
+                payload: {
+                  pagoElectronico: electronico,
+                  medioPago: ride.medioPago,
+                  servicio: ride.servicio,
+                  relanzamiento: true,
+                  intento: ride.intentoDespacho,
+                },
               },
             }
           : {}),
@@ -944,14 +960,40 @@ export class DispatchService {
     at?: { lat: number; lng: number },
   ) {
     const antes = await this.ridesService.byId(rideId);
+
+    /*
+     * La sanción (27/11/2026) se DECIDE antes de soltar la carrera —la nota
+     * del historial la menciona— pero se APLICA después: si soltarla falla
+     * (la oficina la reasignó o la canceló en ese instante, o es un segundo
+     * toque), el conductor no puede quedar suspendido por una carrera que no
+     * llegó a soltar. Y se aplica antes de `releaseDriver`, que mira si quedó
+     * suspendido para cerrarle el turno en vez de dejarlo disponible.
+     */
+    const [previas] = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(rideDriverCancellations)
+      .where(
+        and(
+          eq(rideDriverCancellations.driverId, conductor.id),
+          inArray(rideDriverCancellations.motivo, ['falla_mecanica', 'accidente', 'emergencia']),
+          sql`${rideDriverCancellations.createdAt} >= date_trunc('day', now() at time zone 'America/Bogota') at time zone 'America/Bogota'`,
+        ),
+      );
+    const sancion = sancionPorCancelar(motivo.clave, previas?.n ?? 0);
+    let suspendidoHasta: Date | null = null;
+
     await this.ridesService.transition(rideId, 'NOTIFIED', SYSTEM, {
-      note: `${conductor.name} (${conductor.code}) canceló por fuerza mayor: ${motivo.texto}. Se busca otro taxi.`,
+      note: `${conductor.name} (${conductor.code}) canceló: ${motivo.texto}. Se busca otro taxi.${
+        sancion ? ` Quedó suspendido ${sancion.minutos} minutos.` : ''
+      }`,
       at,
       patch: { driverId: null, vehicleId: null, assignedAt: null, arrivedAt: null },
       event: {
         type: 'ride.no_driver',
         payload: {
           pagoElectronico: antes.pagoElectronico,
+          medioPago: antes.medioPago,
+          servicio: antes.servicio,
           conductorCancelo: true,
           motivo: motivo.clave,
           // En qué iba: si ya estaba en el punto, el cliente lo estaba viendo.
@@ -969,17 +1011,45 @@ export class DispatchService {
       lat: at?.lat ?? null,
       lng: at?.lng ?? null,
     });
+    if (sancion) {
+      suspendidoHasta = await this.fleet.sancionar(
+        conductor.id,
+        sancion.minutos,
+        `Automática: ${sancion.razon} (${antes.code}: ${motivo.texto}).`,
+      );
+      await this.audit.record({
+        actorId: undefined,
+        actorName: 'Sistema',
+        role: 'system',
+        action: `Suspendió un conductor por ${sancion.minutos} minutos por cancelar una carrera`,
+        entity: 'drivers',
+        entityId: conductor.code,
+        after: { hasta: suspendidoHasta.toISOString(), carrera: antes.code, motivo: motivo.clave, razon: sancion.razon },
+      });
+    }
     await this.releaseDriver(conductor.id);
+    if (sancion && suspendidoHasta) {
+      this.realtime.turnoCerrado(
+        conductor.id,
+        `Quedó suspendido ${sancion.minutos} minutos por cancelar una carrera que ya había aceptado. Puede volver a las ${horaLocal(suspendidoHasta)}.`,
+      );
+    }
 
     this.realtime.alertOffice({
       kind: 'driver_cancelled',
       rideId,
       code: antes.code,
-      message: `${conductor.name} (${conductor.code}) canceló ${antes.code}: ${motivo.texto}. Se está buscando otro taxi solo.`,
+      message: `${conductor.name} (${conductor.code}) canceló ${antes.code}: ${motivo.texto}. Se está buscando otro taxi solo.${
+        sancion ? ` Quedó suspendido ${sancion.minutos} minutos: ${sancion.razon}.` : ''
+      }`,
     });
 
     await this.startWave(rideId, 1);
-    return this.ridesService.byId(rideId);
+    return {
+      ...(await this.ridesService.byId(rideId)),
+      // Para que la aplicación del conductor se lo diga en el acto.
+      sancion: sancion && suspendidoHasta ? { minutos: sancion.minutos, hasta: suspendidoHasta.toISOString(), razon: sancion.razon } : null,
+    };
   }
 
   /* ---------------------------------------------------------- aceptación */
@@ -1044,7 +1114,7 @@ export class DispatchService {
     eventIds: string[],
     revokedDrivers: string[],
   ): Promise<'aceptada' | 'ya_era_suya'> {
-    const result = await tx.execute<{ id: string; code: string; version: number; pago_electronico: boolean }>(sql`
+    const result = await tx.execute<{ id: string; code: string; version: number; pago_electronico: boolean; medio_pago: string; servicio: string | null }>(sql`
       update rides
          set status = 'ASSIGNED',
              driver_id = ${driverId},
@@ -1080,7 +1150,7 @@ export class DispatchService {
          and not exists (
            select 1 from drivers d where d.id = ${driverId} and d.status = 'PAUSED'
          )
-      returning id, code, version, pago_electronico
+      returning id, code, version, pago_electronico, medio_pago, servicio
     `);
 
     const row = result.rows[0];
@@ -1219,6 +1289,8 @@ export class DispatchService {
           code: row.code,
           driverId,
           pagoElectronico: row.pago_electronico,
+          medioPago: row.medio_pago,
+          servicio: row.servicio,
           driver: {
             id: driverId,
             code: driver[0]?.code ?? null,
@@ -1283,7 +1355,12 @@ export class DispatchService {
      * cambia primero la carrera y después se asigna.
      */
     const [conductor] = await this.db
-      .select({ name: drivers.name, acepta: drivers.aceptaPagoElectronico, suspendidoHasta: drivers.suspendidoHasta })
+      .select({
+        name: drivers.name,
+        aceptaPagoElectronico: drivers.aceptaPagoElectronico,
+        capacidades: drivers.capacidades,
+        suspendidoHasta: drivers.suspendidoHasta,
+      })
       .from(drivers)
       .where(eq(drivers.id, driverId))
       .limit(1);
@@ -1295,10 +1372,17 @@ export class DispatchService {
       );
     }
     const ride = await this.ridesService.byId(rideId);
-    if (ride.pagoElectronico && !conductor.acepta) {
+    const sinPapeles = await this.fleet.impedimentoPorDocumentos(driverId);
+    if (sinPapeles) {
+      throw new AppError('DOCUMENTS_EXPIRED', `${conductor.name} no puede recibir carreras: ${sinPapeles}`);
+    }
+    const impedimento = porQueNoPuede(conductor, ride);
+    if (impedimento) {
       throw new AppError(
         'DRIVER_NO_ELECTRONIC_PAYMENT',
-        `${conductor.name} no recibe pagos electrónicos. Elige a otro, o cambia la carrera a efectivo si el cliente puede.`,
+        ride.servicio && conductorPuede(conductor, { medioPago: ride.medioPago })
+          ? `${conductor.name} ${impedimento}. Elige a otro conductor.`
+          : `${conductor.name} ${impedimento}. Elige a otro, o cambia el medio de pago si el cliente puede.`,
       );
     }
 

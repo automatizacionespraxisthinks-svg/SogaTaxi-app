@@ -143,7 +143,7 @@ fun PantallaCarrera(sesion: EstadoSesion) {
                 Spacer(Modifier.height(10.dp))
                 // El medio de pago, para no llevarse la sorpresa al cobrar.
                 Text(
-                    if (carrera.pagoElectronico) "Pago electrónico (Nequi, transferencia, datáfono)" else "Efectivo",
+                    "Paga con " + textoDelPago(carrera.pagoElectronico, carrera.medioPago),
                     color = if (carrera.pagoElectronico) Marca.tinta else Marca.apagado,
                     fontWeight = if (carrera.pagoElectronico) FontWeight.Bold else FontWeight.Normal,
                     fontSize = 16.sp,
@@ -151,6 +151,19 @@ fun PantallaCarrera(sesion: EstadoSesion) {
                         .background(if (carrera.pagoElectronico) Color(0xFFFFF7D1) else Color(0xFFF7F6F2), RoundedCornerShape(8.dp))
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                 )
+                // Mascota, licorera o cables: que lo sepa antes de llegar.
+                textoDelServicio(carrera.servicio)?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Servicio: $it",
+                        color = Marca.tinta,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        modifier = Modifier
+                            .background(Color(0xFFFDEFDC), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
                 carrera.notas?.let {
                     Spacer(Modifier.height(10.dp))
                     Text("Notas", color = Marca.apagado, fontSize = 13.sp)
@@ -173,7 +186,9 @@ fun PantallaCarrera(sesion: EstadoSesion) {
         }
     }
 
-    if (cancelando) DialogoCancelar(carrera.codigo, alCerrar = { cancelando = false })
+    if (cancelando) {
+        DialogoCancelar(carrera.codigo, yaLlego = estado == EstadoCarrera.DRIVER_ARRIVED, alCerrar = { cancelando = false })
+    }
 }
 
 @Composable
@@ -278,7 +293,7 @@ private fun FotoDelLugar(rideId: String, version: String) {
 
 /** Cancelar por causa mayor: motivo de la lista, y con "Otro", explicarlo. */
 @Composable
-private fun DialogoCancelar(codigo: String, alCerrar: () -> Unit) {
+private fun DialogoCancelar(codigo: String, yaLlego: Boolean, alCerrar: () -> Unit) {
     val escena = rememberCoroutineScope()
     var motivo by remember { mutableStateOf<String?>(null) }
     var detalle by remember { mutableStateOf("") }
@@ -292,7 +307,15 @@ private fun DialogoCancelar(codigo: String, alCerrar: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("La carrera vuelve a buscar otro taxi. Queda registrado el motivo.", color = Marca.apagado)
-                MOTIVOS.forEach { (clave, texto) ->
+                Text(
+                    "Cancelar una carrera ya aceptada sin una causa mayor lo suspende 30 minutos. También la segunda cancelación del día.",
+                    color = Marca.tinta,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    modifier = Modifier.fillMaxWidth().background(Color(0xFFFDEFDC), RoundedCornerShape(8.dp)).padding(10.dp),
+                )
+                // «El cliente no aparece» solo vale con el taxi ya en el punto.
+                MOTIVOS.filter { yaLlego || it.first != "cliente_no_aparece" }.forEach { (clave, texto) ->
                     val elegido = motivo == clave
                     Text(
                         texto,

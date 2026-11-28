@@ -2,16 +2,29 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
-import { VEHICULOS_QUE_ATIENDEN, type Point, type VehicleType } from '@tax/shared';
+import {
+  MEDIOS_ELECTRONICOS,
+  VEHICULOS_QUE_ATIENDEN,
+  type Capacidad,
+  type MedioDePago,
+  type Point,
+  type Servicio,
+  type VehicleType,
+} from '@tax/shared';
 import {
   ACTIVE_RIDE_STATUSES,
   estimateEtaMinutes,
+  ZONA_HORARIA_LOCAL,
+  avisosDeDocumentos,
+  documentosVencidos,
   finDeSuspension,
   sigueSuspendido,
+  type AvisoDeDocumento,
 } from '@tax/shared';
 import { DB, type Database } from '../../db/db.module';
 import { REDIS, redisKeys } from '../../redis/redis.module';
 import {
+  reglasDeFlota,
   driverDevices,
   driverPositions,
   driverShifts,
@@ -33,6 +46,22 @@ import { isUniqueViolation } from '../../common/pg-errors';
  * nadie tenga que quitarla.
  */
 export const noSuspendido = sql`(${drivers.suspendidoHasta} is null or ${drivers.suspendidoHasta} <= now())`;
+
+/**
+ * Con el bloqueo por documentos activado, solo quien tiene la licencia, el
+ * SOAT y la técnico-mecánica sin vencer (27/11/2026). Una fecha vacía no
+ * cuenta como vencida. Dice lo mismo que `documentosVencidos()` de
+ * packages/shared, con la fecha de Sogamoso. Necesita `drivers` y `vehicles`
+ * en la consulta.
+ */
+export const documentosAlDia = sql`(
+  not coalesce((select r.bloquear_por_documentos from fleet_rules r where r.id = 1), false)
+  or (
+    (${drivers.licenseExpiresOn} is null or ${drivers.licenseExpiresOn} >= (now() at time zone 'America/Bogota')::date)
+    and (${vehicles.soatExpiresOn} is null or ${vehicles.soatExpiresOn} >= (now() at time zone 'America/Bogota')::date)
+    and (${vehicles.rtoExpiresOn} is null or ${vehicles.rtoExpiresOn} >= (now() at time zone 'America/Bogota')::date)
+  )
+)`;
 
 /** Un vehículo permitido del conductor: del listado maestro o del panel. */
 export interface MovilVinculado {
@@ -61,6 +90,7 @@ export interface DriverWithPosition {
   active: boolean;
   esPrueba: boolean;
   aceptaPagoElectronico: boolean;
+  capacidades: Capacidad[];
   /** Solo mientras la suspensión sigue en pie. */
   suspendidoHasta?: Date;
   motivoSuspension?: string;
@@ -94,6 +124,41 @@ export interface Candidate {
  * La última posición vive en Redis (GEOSEARCH responde en milisegundos sin
  * otra instancia, ADR-05); el histórico se muestrea a Postgres.
  */
+/** Lo que una carrera le exige al conductor además del tipo de vehículo. */
+export interface ExigenciasDeCarrera {
+  medioPago?: MedioDePago | null;
+  servicio?: Servicio | null;
+}
+
+/**
+ * Las condiciones SQL de `conductorPuede()` (packages/shared): el medio de
+ * pago exacto, o cualquiera de los electrónicos si la carrera no dijo cuál,
+ * y el servicio. Tienen que decir lo mismo que esa función: con ella se
+ * valida la asignación manual.
+ */
+function cumpleLasExigencias(exige: ExigenciasDeCarrera) {
+  const condiciones = [];
+  const medio = exige.medioPago ?? 'efectivo';
+  if (medio === 'electronico') {
+    condiciones.push(
+      sql`(${drivers.aceptaPagoElectronico} or ${drivers.capacidades} && ${sql.raw(`array['${MEDIOS_ELECTRONICOS.join("','")}']::text[]`)})`,
+    );
+  } else if (medio !== 'efectivo') {
+    /*
+     * El medio exacto, o la marca vieja de «pago electrónico» en quien aún
+     * no tiene ningún medio anotado: mientras no se carguen los medios de
+     * cada conductor, una carrera con Nequi no puede quedarse sin nadie a
+     * quien ofrecérsela. En cuanto a un conductor se le anota un medio, vale
+     * solo lo anotado.
+     */
+    condiciones.push(
+      sql`(${drivers.capacidades} @> array[${medio}]::text[] or (${drivers.aceptaPagoElectronico} and not ${drivers.capacidades} && ${sql.raw(`array['${MEDIOS_ELECTRONICOS.join("','")}']::text[]`)}))`,
+    );
+  }
+  if (exige.servicio) condiciones.push(sql`${drivers.capacidades} @> array[${exige.servicio}]::text[]`);
+  return condiciones;
+}
+
 @Injectable()
 export class FleetService {
   private readonly logger = new Logger(FleetService.name);
@@ -125,6 +190,7 @@ export class FleetService {
     // Antes de relevar: si no, con la placa de un compañero se le cerraba el
     // turno aunque después no se pudiera abrir el propio.
     await this.exigirPermitido(driverId, vehicle.id, vehicle.plate);
+    await this.exigirDocumentosAlDia(driverId, vehicle);
     await this.relevar(vehicle.id, vehicle.plate, driverId);
 
     const shiftId = uuidv7();
@@ -216,6 +282,7 @@ export class FleetService {
 
     // Antes de cerrar nada: un carro no permitido no le cuesta el turno.
     await this.exigirPermitido(driverId, vehicle.id, vehicle.plate);
+    await this.exigirDocumentosAlDia(driverId, vehicle);
 
     // Quien tenga ahora ese carro lo suelta, salvo que vaya en carrera.
     await this.relevar(vehicle.id, vehicle.plate, driverId);
@@ -299,6 +366,90 @@ export class FleetService {
       .where(eq(drivers.id, driverId))
       .limit(1);
     return fila?.hasta && sigueSuspendido(fila.hasta) ? fila.hasta : null;
+  }
+
+  /* ------------------------------------------------ documentos al día --- */
+
+  /** Si la empresa activó el bloqueo por documentos vencidos. */
+  async bloqueoPorDocumentos(): Promise<boolean> {
+    const [regla] = await this.db
+      .select({ activo: reglasDeFlota.bloquearPorDocumentos })
+      .from(reglasDeFlota)
+      .where(eq(reglasDeFlota.id, 1))
+      .limit(1);
+    return regla?.activo ?? false;
+  }
+
+  async fijarBloqueoPorDocumentos(activo: boolean): Promise<void> {
+    await this.db
+      .insert(reglasDeFlota)
+      .values({ id: 1, bloquearPorDocumentos: activo })
+      .onConflictDoUpdate({ target: reglasDeFlota.id, set: { bloquearPorDocumentos: activo, updatedAt: new Date() } });
+  }
+
+  /**
+   * Lo que el conductor tiene vencido o por vencer: su licencia y los
+   * papeles del carro. Con turno abierto, el carro del turno; sin turno, los
+   * que tiene permitidos, porque todavía no se sabe en cuál va a salir.
+   */
+  async avisosDeDocumentos(driverId: string, soloEsteCarro?: string): Promise<AvisoDeDocumento[]> {
+    const hoy = new Intl.DateTimeFormat('en-CA', { timeZone: ZONA_HORARIA_LOCAL }).format(new Date());
+    const [conductor] = await this.db
+      .select({ licencia: drivers.licenseExpiresOn })
+      .from(drivers)
+      .where(eq(drivers.id, driverId))
+      .limit(1);
+    if (!conductor) return [];
+
+    const delTurno = soloEsteCarro ?? (await this.openShiftOf(driverId))?.vehicleId;
+    const carros = delTurno
+      ? await this.db
+          .select({ placa: vehicles.plate, soat: vehicles.soatExpiresOn, tecnomecanica: vehicles.rtoExpiresOn })
+          .from(vehicles)
+          .where(eq(vehicles.id, delTurno))
+      : await this.db
+          .select({ placa: vehicles.plate, soat: vehicles.soatExpiresOn, tecnomecanica: vehicles.rtoExpiresOn })
+          .from(vehicleDrivers)
+          .innerJoin(vehicles, eq(vehicles.id, vehicleDrivers.vehicleId))
+          .where(and(eq(vehicleDrivers.driverId, driverId), eq(vehicles.active, true)));
+    return avisosDeDocumentos(hoy, conductor.licencia, carros);
+  }
+
+  /** No deja abrir turno con documentos vencidos, si el bloqueo está activado. */
+  private async exigirDocumentosAlDia(driverId: string, vehicle: { id: string }): Promise<void> {
+    if (!(await this.bloqueoPorDocumentos())) return;
+    const vencidos = documentosVencidos(await this.avisosDeDocumentos(driverId, vehicle.id));
+    if (vencidos) {
+      throw new AppError(
+        'DOCUMENTS_EXPIRED',
+        `${vencidos} No puede abrir turno hasta renovarlo: lleve el documento nuevo a la oficina para que lo actualicen.`,
+      );
+    }
+  }
+
+  /** Lo que impide asignarle una carrera a mano por documentos; `null` si nada. */
+  async impedimentoPorDocumentos(driverId: string): Promise<string | null> {
+    if (!(await this.bloqueoPorDocumentos())) return null;
+    return documentosVencidos(await this.avisosDeDocumentos(driverId));
+  }
+
+  /* -------------------------------------------------- sanción automática --- */
+
+  /**
+   * Suspende al conductor por unos minutos (27/11/2026). Es la misma
+   * suspensión de la oficina —mismas columnas, mismos efectos— pero corta y
+   * puesta por el sistema; se levanta sola al cumplirse. Si ya tenía una
+   * suspensión más larga, se respeta esa.
+   */
+  async sancionar(driverId: string, minutos: number, motivo: string): Promise<Date> {
+    const hasta = new Date(Date.now() + minutos * 60_000);
+    const actual = await this.suspensionDe(driverId);
+    if (actual && actual.getTime() >= hasta.getTime()) return actual;
+    await this.db
+      .update(drivers)
+      .set({ suspendidoHasta: hasta, motivoSuspension: motivo, updatedAt: new Date() })
+      .where(eq(drivers.id, driverId));
+    return hasta;
   }
 
   async exigirNoSuspendido(driverId: string): Promise<void> {
@@ -547,8 +698,9 @@ export class FleetService {
    * vehículo, turno). Hacerlo al revés obligaría a recorrer toda la flota.
    */
   /**
-   * Con `pagoElectronico`, solo los que lo aceptan: es un filtro más, como el
-   * tipo de vehículo, y no cambia las oleadas ni sus radios por zona.
+   * Con `exige`, solo los que reciben ese medio de pago y prestan ese
+   * servicio: es un filtro más, como el tipo de vehículo, y no cambia las
+   * oleadas ni sus radios por zona.
    */
   async findCandidates(
     pickup: Point,
@@ -556,7 +708,7 @@ export class FleetService {
     vehicleType: VehicleType,
     limit: number,
     exclude: string[] = [],
-    pagoElectronico = false,
+    exige: ExigenciasDeCarrera = {},
     /**
      * Deja fuera a quien lleva más de estos segundos sin reportar posición.
      * Siempre viene: el tope de seguridad de los ajustes del despacho (30 min
@@ -616,7 +768,8 @@ export class FleetService {
           eq(drivers.status, 'AVAILABLE'),
           eq(drivers.active, true),
           noSuspendido,
-          pagoElectronico ? eq(drivers.aceptaPagoElectronico, true) : undefined,
+          documentosAlDia,
+          ...cumpleLasExigencias(exige),
           eq(vehicles.active, true),
           inArray(vehicles.type, [...VEHICULOS_QUE_ATIENDEN[vehicleType]]),
         ),
@@ -704,6 +857,7 @@ export class FleetService {
         active: drivers.active,
         esPrueba: drivers.esPrueba,
         aceptaPagoElectronico: drivers.aceptaPagoElectronico,
+        capacidades: drivers.capacidades,
         suspendidoHasta: drivers.suspendidoHasta,
         motivoSuspension: drivers.motivoSuspension,
         shiftStartedAt: driverShifts.startedAt,

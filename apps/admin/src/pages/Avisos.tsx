@@ -3,6 +3,7 @@ import { BellRing, CarFront, ChevronDown, UserRound } from 'lucide-react';
 import type { AvisoDeFlota, GrupoDeAvisosDeFlota } from '@tax/shared';
 import { Card, EmptyState, Input, StatusPill, cn } from '@tax/ui';
 import { useAvisosDeFlota } from '../api/queries';
+import { BloqueoPorDocumentos } from '../components/BloqueoPorDocumentos';
 
 /**
  * Avisos de la flota (26/11/2026).
@@ -37,7 +38,8 @@ export function Avisos() {
 
   if (data.grupos.length === 0) {
     return (
-      <div className="p-5">
+      <div className="space-y-4 p-5">
+        <BloqueoPorDocumentos />
         <Card>
           <EmptyState
             icon={<BellRing className="size-4" />}
@@ -72,6 +74,7 @@ export function Avisos() {
 
   return (
     <div className="space-y-4 p-5">
+      <BloqueoPorDocumentos />
       <div className="grid gap-3 sm:grid-cols-2">
         <Resumen tono="critical" numero={cuenta(vencidos)} titulo="Vencidos" ayuda="No pueden esperar" />
         <Resumen

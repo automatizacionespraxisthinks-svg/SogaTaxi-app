@@ -1,3 +1,4 @@
+import { capacidadesValidas, esMedioElectronico, type Capacidad } from '@tax/shared';
 import { randomInt } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
@@ -24,7 +25,7 @@ import {
 } from '../../db/schema';
 import { AppError } from '../../common/problem';
 import { isUniqueViolation } from '../../common/pg-errors';
-import { documentHash, encryptColumn, hashSecret } from '../../common/crypto';
+import { decryptColumn, documentHash, encryptColumn, hashSecret } from '../../common/crypto';
 import { loadEnv } from '../../config/env';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { AuditService } from '../audit/audit.service';
@@ -57,6 +58,8 @@ export interface NuevoConductor {
   code: string;
   name: string;
   phone: string;
+  /** La cédula, solo dígitos; opcional al dar de alta. */
+  cedula?: string;
   /**
    * Los vehículos que podrá manejar, elegidos de los dados de alta
    * (18/11/2026). Es lo que usa el panel.
@@ -100,6 +103,8 @@ export interface CambiosConductor {
   active?: boolean;
   esPrueba?: boolean;
   aceptaPagoElectronico?: boolean;
+  /** Los medios de pago que recibe y los servicios que presta: la lista entera. */
+  capacidades?: Capacidad[];
   /** La cédula, solo dígitos. No se puede dejar vacía una vez puesta. */
   cedula?: string;
   /** `AAAA-MM-DD`, o nulo para borrarla. */
@@ -152,6 +157,12 @@ export class FleetAdminService {
     // lo protege no es la longitud sino el bloqueo a los cinco intentos.
     const pin = String(randomInt(1000, 10000));
     const id = uuidv7();
+    // La cédula va cifrada, con su huella para no repetirla entre conductores.
+    const clave = loadEnv().ENCRYPTION_KEY;
+    const cedula = input.cedula?.replace(/\D/g, '');
+    const documento = cedula
+      ? { documentEncrypted: encryptColumn(clave, cedula), documentHash: documentHash(clave, cedula) }
+      : {};
 
     try {
       await this.db.transaction(async (tx) => {
@@ -173,6 +184,7 @@ export class FleetAdminService {
           name: input.name.trim(),
           phone: input.phone.trim(),
           pinHash: await hashSecret(pin),
+          ...documento,
         });
 
         const placas = await this.vincular(tx as unknown as Database, id, vehicleIds);
@@ -201,6 +213,9 @@ export class FleetAdminService {
           `El código ${code} ya está en uso o perteneció a un conductor eliminado. Usa otro.`,
         );
       }
+      if (isUniqueViolation(error, 'drivers_document_hash_key')) {
+        throw new AppError('VALIDATION_FAILED', 'Esa cédula ya es de otro conductor.');
+      }
       throw error;
     }
 
@@ -226,6 +241,7 @@ export class FleetAdminService {
         active: drivers.active,
         esPrueba: drivers.esPrueba,
         aceptaPagoElectronico: drivers.aceptaPagoElectronico,
+        capacidades: drivers.capacidades,
         licenseExpiresOn: drivers.licenseExpiresOn,
         licenseRestriction: drivers.licenseRestriction,
         extra: drivers.extra,
@@ -236,12 +252,29 @@ export class FleetAdminService {
 
     if (!antes) throw new AppError('NOT_FOUND', 'El conductor no existe');
 
+    /*
+     * Las capacidades mandan sobre la marca vieja de «pago electrónico»: si
+     * llega la lista, la marca queda en lo que la lista diga. El interruptor
+     * de antes (sin lista) sigue valiendo para un panel sin actualizar.
+     *
+     * Salvo en un caso: quien traía la marca vieja y todavía no tiene ningún
+     * medio anotado (todos, el día de la actualización). Marcarle solo
+     * «Mascotas» no puede quitarle el pago electrónico que ya recibía; la
+     * marca se le va cuando se le anote y luego se le quite un medio.
+     */
+    const capacidades = cambios.capacidades ? capacidadesValidas(cambios.capacidades) : antes.capacidades;
+    const soloMarcaVieja = antes.aceptaPagoElectronico && !antes.capacidades.some(esMedioElectronico);
+    const aceptaElectronico = cambios.capacidades
+      ? capacidades.some(esMedioElectronico) || soloMarcaVieja
+      : (cambios.aceptaPagoElectronico ?? antes.aceptaPagoElectronico);
+
     const despues = {
       name: cambios.name?.trim() ?? antes.name,
       phone: cambios.phone?.trim() ?? antes.phone,
       active: cambios.active ?? antes.active,
       esPrueba: cambios.esPrueba ?? antes.esPrueba,
-      aceptaPagoElectronico: cambios.aceptaPagoElectronico ?? antes.aceptaPagoElectronico,
+      aceptaPagoElectronico: aceptaElectronico,
+      capacidades,
       licenseExpiresOn: cambios.licenseExpiresOn === undefined ? antes.licenseExpiresOn : cambios.licenseExpiresOn,
       licenseRestriction:
         cambios.licenseRestriction === undefined ? antes.licenseRestriction : cambios.licenseRestriction?.trim() || null,
@@ -260,11 +293,13 @@ export class FleetAdminService {
           ? despues.esPrueba
             ? 'Marcó un conductor como cuenta de prueba'
             : 'Quitó la marca de prueba a un conductor'
-          : despues.aceptaPagoElectronico !== antes.aceptaPagoElectronico
-            ? despues.aceptaPagoElectronico
-              ? 'Habilitó los pagos electrónicos a un conductor'
-              : 'Quitó los pagos electrónicos a un conductor'
-            : 'Editó un conductor';
+          : despues.capacidades.join() !== antes.capacidades.join()
+            ? 'Cambió los medios de pago y servicios de un conductor'
+            : despues.aceptaPagoElectronico !== antes.aceptaPagoElectronico
+              ? despues.aceptaPagoElectronico
+                ? 'Habilitó los pagos electrónicos a un conductor'
+                : 'Quitó los pagos electrónicos a un conductor'
+              : 'Editó un conductor';
 
     try {
       await this.db.transaction(async (tx) => {
@@ -1063,6 +1098,29 @@ export class FleetAdminService {
       porVehiculo.set(vehicleId, [...(porVehiculo.get(vehicleId) ?? []), quien]);
     }
     return filas.map((fila) => ({ ...fila, quienes: porVehiculo.get(fila.id) ?? [] }));
+  }
+
+  /**
+   * La cédula de un conductor, descifrada, o nula si no la tiene. Los
+   * cargados con el script SQL tienen la huella pero no la cédula cifrada:
+   * para esos también es nula, y hay que volver a escribirla.
+   */
+  async cedulaDe(driverId: string): Promise<string | null> {
+    const [fila] = await this.db
+      .select({ documentEncrypted: drivers.documentEncrypted })
+      .from(drivers)
+      .where(eq(drivers.id, driverId))
+      .limit(1);
+    if (!fila) throw new AppError('NOT_FOUND', 'Ese conductor no existe.');
+    if (!fila.documentEncrypted) return null;
+    try {
+      return decryptColumn(loadEnv().ENCRYPTION_KEY, fila.documentEncrypted);
+    } catch {
+      // Cifrada con otra clave (una base copiada de otra instalación): no se
+      // puede leer, pero la ficha no tiene por qué romperse.
+      this.logger.warn({ driverId }, 'No se pudo descifrar la cédula');
+      return null;
+    }
   }
 
   /** Si tiene turno abierto; la oficina lo necesita antes de desactivarlo. */

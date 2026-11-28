@@ -15,6 +15,7 @@ import { Flota } from './pages/Flota';
 import { Zonas } from './pages/Zonas';
 import { Avisos } from './pages/Avisos';
 import { Reportes } from './pages/Reportes';
+import { Operadoras } from './pages/Operadoras';
 import { Sistema } from './pages/Sistema';
 
 const queryClient = new QueryClient({
@@ -69,6 +70,14 @@ function AnimatedRoutes() {
             element={
               <ConPermiso permiso="reportes.ver">
                 <Reportes />
+              </ConPermiso>
+            }
+          />
+          <Route
+            path="/operadoras"
+            element={
+              <ConPermiso permiso="operadoras.ver">
+                <Operadoras />
               </ConPermiso>
             }
           />

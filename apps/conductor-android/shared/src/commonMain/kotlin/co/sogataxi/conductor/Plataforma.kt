@@ -104,8 +104,17 @@ class RespuestaHttp(val estado: Int, val cuerpo: ByteArray)
 
 class SinSenal(causa: Throwable? = null) : Exception("Sin señal", causa)
 
-/** Un permiso o ajuste del teléfono. `arreglar` nulo: se resuelve pidiendo los permisos. */
-class Requisito(val nombre: String, val listo: Boolean, val arreglar: (() -> Unit)? = null)
+/**
+ * Un permiso o ajuste del teléfono. `detalle` dice para qué sirve y `accion`
+ * es el texto de su botón. `arreglar` nulo: se resuelve pidiendo los permisos.
+ */
+class Requisito(
+    val nombre: String,
+    val listo: Boolean,
+    val detalle: String? = null,
+    val accion: String = "Permitir",
+    val arreglar: (() -> Unit)? = null,
+)
 
 /** Los avisos al conductor que no son ofertas. El 1 es el turno y el 2 la oferta. */
 object Avisos {

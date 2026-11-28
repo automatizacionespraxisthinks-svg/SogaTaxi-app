@@ -7,6 +7,7 @@ import {
   BarChart3,
   BellRing,
   CircleDot,
+  Headset,
   LayoutGrid,
   LogOut,
   type LucideIcon,
@@ -47,6 +48,7 @@ const NAV: NavItem[] = [
   { to: '/zonas', label: 'Zonas', icon: Map },
   { to: '/avisos', label: 'Avisos', icon: BellRing },
   { to: '/reportes', label: 'Reportes', icon: BarChart3, permisos: ['reportes.ver'] },
+  { to: '/operadoras', label: 'Operadoras', icon: Headset, permisos: ['operadoras.ver'] },
   {
     to: '/sistema',
     label: 'Sistema',
@@ -62,6 +64,7 @@ const TITLES: Record<string, string> = {
   '/zonas': 'Zonas',
   '/avisos': 'Avisos de la flota',
   '/reportes': 'Reportes',
+  '/operadoras': 'Operadoras',
   '/sistema': 'Sistema',
 };
 

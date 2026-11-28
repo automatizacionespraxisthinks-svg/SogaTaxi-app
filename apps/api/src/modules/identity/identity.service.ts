@@ -385,7 +385,32 @@ export class IdentityService {
       .limit(1);
 
     if (!row || !row.active) return null;
+    return this.conductorSiPuedeEntrar(row);
+  }
 
+  /**
+   * Hasta cuándo está suspendido el dueño de este token, si lo está
+   * (27/11/2026). El guardia lo usa para decirle «está suspendido hasta las
+   * 3:45» en vez de «sesión inválida»: con una sanción de media hora, el
+   * conductor tiene que saber que es cosa de esperar y no de llamar.
+   */
+  async suspensionDelToken(token: string): Promise<Date | null> {
+    const [row] = await this.db
+      .select({ hasta: drivers.suspendidoHasta, active: drivers.active })
+      .from(driverDevices)
+      .innerJoin(drivers, eq(drivers.id, driverDevices.driverId))
+      .where(and(eq(driverDevices.refreshTokenHash, sha256Hex(token)), isNull(driverDevices.revokedAt)))
+      .limit(1);
+    return row?.active && row.hasta && sigueSuspendido(row.hasta) ? row.hasta : null;
+  }
+
+  private async conductorSiPuedeEntrar(row: {
+    driverId: string;
+    code: string;
+    name: string;
+    deviceId: string;
+    suspendidoHasta: Date | null;
+  }): Promise<DriverPrincipal | null> {
     /*
      * Un suspendido queda fuera de la PWA, salvo que tenga una carrera
      * andando: se la deja terminar, porque cortarle el acceso dejaría al

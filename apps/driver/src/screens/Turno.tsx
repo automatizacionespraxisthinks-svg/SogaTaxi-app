@@ -1,3 +1,4 @@
+import { AvisosDeDocumentos, type AvisoDeDocumentos } from '../components/AvisosDeDocumentos';
 import { motion } from 'motion/react';
 import { BellOff, BellRing, Coffee, LogOut, Play, Radar } from 'lucide-react';
 import { formatDuration } from '@tax/shared';
@@ -16,6 +17,7 @@ import { PlacasPermitidas } from '../components/PlacasPermitidas';
  * conductor no aprende tres pantallas distintas.
  */
 export function Turno({
+  documentos = [],
   session,
   push,
   onEnablePush,
@@ -28,6 +30,8 @@ export function Turno({
   onSwitchVehicle,
   onChangeDriver,
 }: {
+  /** Licencia, SOAT o técnico-mecánica vencidos o por vencer. */
+  documentos?: AvisoDeDocumentos[];
   session: SessionState;
   /** Quién tiene la sesión en este celular: con un celular compartido, importa. */
   conductor?: { code: string; name: string };
@@ -84,6 +88,7 @@ export function Turno({
     <>
       <Screen>
         <div className="flex flex-col items-center justify-center gap-5 py-10 text-center">
+          <AvisosDeDocumentos avisos={documentos} />
           {/* Mientras está disponible, el halo late: la app está escuchando.
               Es blanco al 20 %, que con el desvanecido del latido queda en
               torno al 10 % sobre el amarillo. */}

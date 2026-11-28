@@ -225,6 +225,27 @@
       "when": 1795705640425,
       "tag": "0031_campos_adicionales",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1795823499827,
+      "tag": "0032_capacidades_y_medio_de_pago",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1795824892769,
+      "tag": "0033_reglas_de_flota",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1795857800805,
+      "tag": "0034_quien_creo_la_carrera",
+      "breakpoints": true
     }
   ]
 }

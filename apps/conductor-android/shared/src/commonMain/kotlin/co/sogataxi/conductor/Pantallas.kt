@@ -351,35 +351,6 @@ fun PantallaResumen(sesion: EstadoSesion) {
 
 /* -------------------------------------------------------- chequeo y diagnóstico */
 
-/**
- * Lo que tiene que estar permitido para que el turno funcione con el
- * teléfono bloqueado. Si todo está bien, no se muestra.
- */
-@Composable
-fun Chequeo(refresco: Int, alPedirPermisos: () -> Unit) {
-    val requisitos = remember(refresco) { plataforma.requisitos() }
-    if (requisitos.all { it.listo }) return
-
-    Tarjeta {
-        Text("Falta permitir", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-        Text("Sin esto el teléfono puede dejar de enviar el GPS o no sonar con las ofertas.", color = Marca.apagado)
-        Spacer(Modifier.height(6.dp))
-        requisitos.forEach { FilaChequeo(it.nombre, it.listo, it.arreglar ?: alPedirPermisos) }
-    }
-}
-
-@Composable
-private fun FilaChequeo(texto: String, listo: Boolean, alArreglar: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text((if (listo) "✓  " else "✗  ") + texto, color = if (listo) Marca.verde else Marca.rojo, fontSize = 16.sp)
-        if (!listo) TextButton(onClick = alArreglar) { Text("Permitir", color = Marca.tinta, fontWeight = FontWeight.Bold) }
-    }
-}
-
 /** Para el piloto con conductores: plegado, se abre si hace falta reportar algo. */
 @Composable
 fun PanelDiagnostico() {

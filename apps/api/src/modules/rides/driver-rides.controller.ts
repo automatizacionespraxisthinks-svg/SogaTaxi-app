@@ -1,3 +1,4 @@
+import { puedeMarcarClienteNoAparece } from '@tax/shared';
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -69,16 +70,31 @@ export class DriverRidesController {
   async me(@Req() request: FastifyRequest) {
     const driver = requireDriver(request);
 
-    const [session, shift, totals] = await Promise.all([
+    const [session, shift, totals, documentos, bloqueo] = await Promise.all([
       this.rides.driverSession(driver.id),
       this.fleet.currentShift(driver.id),
       this.fleet.todayTotals(driver.id),
+      this.fleet.avisosDeDocumentos(driver.id),
+      this.fleet.bloqueoPorDocumentos(),
     ]);
 
     return {
       driver: { id: driver.id, code: driver.code, name: driver.name },
       shift,
       totals,
+      /*
+       * Los documentos vencidos o por vencer (27/11/2026), para avisarle al
+       * entrar: su licencia y los papeles del carro. `bloquea` dice si con
+       * algo vencido no podrá abrir turno, que depende de si la empresa
+       * activó esa regla.
+       */
+      avisos: documentos.map((d) => ({
+        clase: d.clase,
+        vencido: d.vencido,
+        dias: d.dias,
+        texto: d.texto,
+        bloquea: bloqueo && d.vencido,
+      })),
       /*
        * Las reglas que la PWA necesita para comportarse igual que el
        * servidor. Vienen de aquí para que cambiarlas en el entorno de la API
@@ -248,6 +264,15 @@ export class DriverRidesController {
     }
 
     const motivo = textoDelMotivo(body.motivo, body.detalle);
+
+    // «El cliente no aparece» solo vale con el taxi ya en el punto: marcarlo
+    // desde lejos era la forma de soltar la carrera sin que contara.
+    if (body.motivo === 'cliente_no_aparece' && !puedeMarcarClienteNoAparece(ride.status)) {
+      throw new AppError(
+        'INVALID_TRANSITION',
+        'Para marcar que el cliente no aparece, primero tiene que llegar al punto y pulsar «Llegué».',
+      );
+    }
 
     /*
      * Fuerza mayor (21/11/2026): la carrera no se cancela, se le busca otro

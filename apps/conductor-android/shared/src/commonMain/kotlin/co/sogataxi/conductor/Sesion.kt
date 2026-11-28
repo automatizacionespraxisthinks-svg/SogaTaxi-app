@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -44,7 +45,9 @@ object Sesion {
     private fun cambiar(transformar: (EstadoSesion) -> EstadoSesion) {
         estado.update(transformar)
         val nuevo = estado.value
-        if (nuevo.fase != Fase.ACCESO) Prefs.ultimoEstado = nuevo.aJson().toString()
+        // Al salir a la pantalla de acceso no queda nada guardado: si no, al
+        // reabrir sin señal volvía la carrera o el turno de un suspendido.
+        Prefs.ultimoEstado = if (nuevo.fase != Fase.ACCESO) nuevo.aJson().toString() else null
     }
 
     fun avisar(texto: String?) = cambiar { it.copy(aviso = texto) }
@@ -89,7 +92,9 @@ object Sesion {
                 cambiar {
                     EstadoSesion(
                         fase = Fase.ACCESO,
-                        aviso = "La oficina no reconoce esta sesión: puede estar suspendida. Llama a la oficina o vuelve a entrar.",
+                        // Suspendido: el servidor dice hasta cuándo, y eso es lo que importa.
+                        aviso = e.message?.takeIf { it.startsWith("Está suspendido") }
+                            ?: "La oficina no reconoce esta sesión: puede estar suspendida. Llama a la oficina o vuelve a entrar.",
                     )
                 }
             } else {
@@ -103,6 +108,9 @@ object Sesion {
         val totales = yo.objeto("totals")
         val activa = yo.objeto("activeRide")
         val pendiente = yo.objeto("pendingOffer")
+        val documentos = (yo["avisos"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.mapNotNull { d ->
+            d.texto("texto")?.let { AvisoDeDocumento(it, d.booleano("vencido"), d.booleano("bloquea")) }
+        }
         val turnoDesde = instanteMs(turno?.texto("startedAt"))
         turno?.texto("plate")?.let { Prefs.placa = it }
         yo.objeto("driver")?.let { conductor ->
@@ -124,6 +132,7 @@ object Sesion {
                 minutosMinimos = reglas?.entero("minRideMinutes") ?: antes.minutosMinimos,
                 radioLlegada = reglas?.entero("arrivalRadiusMeters") ?: antes.radioLlegada,
                 enLinea = true,
+                documentos = documentos,
                 // Un aviso de "sin sesión" ya no aplica si la API contestó.
                 aviso = antes.aviso?.takeUnless { antes.fase == Fase.ACCESO },
             )
@@ -173,6 +182,8 @@ object Sesion {
                         recogida = carrera.texto("pickupText").orEmpty(),
                         referencia = carrera.texto("pickupReference"),
                         pagoElectronico = carrera.booleano("pagoElectronico"),
+                        medioPago = carrera.texto("medioPago"),
+                        servicio = carrera.texto("servicio"),
                         pasajeros = carrera.entero("passengers") ?: 1,
                         distanciaKm = pendiente.doble("distanceKm") ?: 0.0,
                         etaMin = pendiente.entero("etaMinutes") ?: 0,
@@ -284,8 +295,21 @@ object Sesion {
                 si("detalle", detalle?.takeIf { it.isNotBlank() }?.trim())
                 si("at", dondeEstoy())
             }
-            Api.post("/v1/driver/rides/${carrera.rideId}/cancel", cuerpo, idempotencia = Api.nuevaClave())
+            val respuesta = Api.post("/v1/driver/rides/${carrera.rideId}/cancel", cuerpo, idempotencia = Api.nuevaClave())
             Diagnostico.evento("Canceló la carrera ${carrera.codigo}")
+            // Sancionado: el servidor ya le cerró el turno y la sesión.
+            val sancion = (respuesta as? JsonObject)?.objeto("sancion")
+            if (sancion != null) {
+                val minutos = sancion.entero("minutos") ?: 30
+                Diagnostico.evento("Suspendido $minutos min por cancelar")
+                cambiar {
+                    EstadoSesion(
+                        fase = Fase.ACCESO,
+                        aviso = "Quedó suspendido $minutos minutos por cancelar la carrera ${carrera.codigo} que ya había aceptado. Pasado ese tiempo puede volver a entrar.",
+                    )
+                }
+                return null
+            }
             cambiar { it.copy(fase = Fase.DISPONIBLE, carrera = null, estadoCarrera = EstadoCarrera.ASSIGNED) }
             refrescar()
             null

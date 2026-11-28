@@ -156,8 +156,16 @@ class PlataformaIos(
         val ubicacion = tienePermisoDeUbicacion()
         return listOf(
             // Si ya dijo que no, iOS no vuelve a preguntar: hay que ir a Ajustes.
-            Requisito("Ubicación", ubicacion, if (TurnoIos.gpsIos.negado()) ::abrirAjustes else null),
-            Requisito("Notificaciones", avisosPermitidos, if (avisosNegados) ::abrirAjustes else null),
+            Requisito(
+                "Ubicación", ubicacion,
+                detalle = "Para ofrecerte las carreras que te quedan cerca.",
+                arreglar = if (TurnoIos.gpsIos.negado()) ::abrirAjustes else null,
+            ),
+            Requisito(
+                "Notificaciones", avisosPermitidos,
+                detalle = "Para que las ofertas suenen y se vean.",
+                arreglar = if (avisosNegados) ::abrirAjustes else null,
+            ),
         )
     }
 
@@ -189,7 +197,7 @@ class PlataformaIos(
     /* ----------------------------------------------------------- ofertas */
 
     /**
-     * Una notificación con el sonido de alarma de la app (`oferta.wav`, 26 s: el «pi-pi» de SogaTaxi repetido).
+     * Una notificación con el sonido de alarma de la app (`oferta.wav`, 27 s: el «pi-pi» de SogaTaxi repetido).
      * iOS no tiene la «pantalla completa sobre el bloqueo» de Android: el
      * conductor toca el aviso y la oferta está al abrir.
      */
@@ -227,8 +235,8 @@ class PlataformaIos(
         nuevo.numberOfLoops = 0
         if (nuevo.play()) {
             reproductor = nuevo
-            // Dos segundos y se calla (26/11/2026): con tantas carreras, en bucle cansaba.
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2_000_000_000L), dispatch_get_main_queue()) {
+            // Tres segundos y se calla (28/11/2026): con tantas carreras, en bucle cansaba.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3_000_000_000L), dispatch_get_main_queue()) {
                 if (reproductor === nuevo) callarAlarma()
             }
         } else {

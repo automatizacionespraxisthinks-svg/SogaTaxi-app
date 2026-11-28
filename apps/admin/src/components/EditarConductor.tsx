@@ -1,10 +1,11 @@
-import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Driver } from '@tax/shared';
 import { telefonoColombiano } from '@tax/shared';
 import { Banner, Button, Field, Input, Modal, useToast } from '@tax/ui';
 import { ApiError, api } from '../api/client';
 import { actions } from '../live/store';
+import { useCedula } from './ConductorAdmin';
 import { CamposExtraDeLaFicha, camposExtraValidos, soloCamposEnUso, useCamposExtra } from './CamposExtra';
 
 /**
@@ -15,7 +16,8 @@ import { CamposExtraDeLaFicha, camposExtraValidos, soloCamposEnUso, useCamposExt
  * con la carga masiva. Con la flota cargada desde Autocab —cientos sin
  * cédula o con la licencia vencida— la oficina tiene que poder completarlos.
  *
- * La cédula se escribe pero no se muestra: va cifrada y no sale de la API.
+ * La cédula se guarda cifrada. Desde el 28/11/2026 se muestra aquí, a quien
+ * puede gestionar conductores, para poder revisarla y corregirla.
  */
 export function EditarConductor({ driver, onCerrar }: { driver: Driver; onCerrar: () => void }) {
   const toast = useToast();
@@ -23,7 +25,16 @@ export function EditarConductor({ driver, onCerrar }: { driver: Driver; onCerrar
   const [nombre, setNombre] = useState(driver.name);
   const telefonoInicial = driver.phone.replace(/^\+57/, '');
   const [telefono, setTelefono] = useState(telefonoInicial);
+  const qc = useQueryClient();
+  const guardada = useCedula(driver.id);
+  const cedulaGuardada = guardada.data?.cedula ?? '';
   const [cedula, setCedula] = useState('');
+  const [cedulaTocada, setCedulaTocada] = useState(false);
+  // Llega un instante después de abrir: se pone si aún no se ha escrito nada.
+  useEffect(() => {
+    if (!cedulaTocada && cedulaGuardada) setCedula(cedulaGuardada);
+  }, [cedulaGuardada, cedulaTocada]);
+  const cambioLaCedula = cedula !== '' && cedula !== cedulaGuardada;
   const [licencia, setLicencia] = useState(driver.licenciaVence ?? '');
   const [restriccion, setRestriccion] = useState(driver.licenciaRestriccion ?? '');
   const [extra, setExtra] = useState<Record<string, string>>(driver.extra ?? {});
@@ -42,13 +53,14 @@ export function EditarConductor({ driver, onCerrar }: { driver: Driver; onCerrar
       api.patch(`/v1/admin/drivers/${driver.id}`, {
         name: nombre.trim(),
         ...(celular ? { phone: celular } : {}),
-        ...(cedula ? { cedula } : {}),
+        ...(cambioLaCedula ? { cedula } : {}),
         licenseExpiresOn: licencia || null,
         licenseRestriction: restriccion.trim() || null,
         extra: soloCamposEnUso(campos, 'conductor', extra),
       }),
     onSuccess: async () => {
       await actions.refreshDrivers();
+      await qc.invalidateQueries({ queryKey: ['cedula', driver.id] });
       toast.push({ tone: 'positive', title: 'Datos actualizados', description: `${nombre.trim()} · código ${driver.code}` });
       onCerrar();
     },
@@ -97,17 +109,23 @@ export function EditarConductor({ driver, onCerrar }: { driver: Driver; onCerrar
             hint={
               !cedulaValida
                 ? 'Entre 6 y 10 dígitos, sin puntos'
-                : driver.tieneCedula
-                  ? 'Ya está registrada. Escriba solo si hay que corregirla.'
-                  : 'Falta: escríbala para registrarla.'
+                : cedulaGuardada
+                  ? cedula === '' ? 'No se puede dejar vacía: se conserva la que tenía.' : undefined
+                  : driver.tieneCedula
+                    ? 'Está registrada pero no se puede mostrar. Escríbala de nuevo.'
+                    : 'Falta: escríbala para registrarla.'
             }
           >
             <Input
               id="ed-cedula"
               inputMode="numeric"
-              placeholder={driver.tieneCedula ? '••••••••' : 'Sin registrar'}
+              maxLength={10}
+              placeholder={driver.tieneCedula ? 'Registrada' : 'Sin registrar'}
               value={cedula}
-              onChange={(e) => setCedula(e.target.value.replace(/\D/g, ''))}
+              onChange={(e) => {
+                setCedulaTocada(true);
+                setCedula(e.target.value.replace(/\D/g, ''));
+              }}
             />
           </Field>
           <Field label="Vence la licencia" htmlFor="ed-licencia" hint="Con la fecha, el panel avisa antes de que venza.">

@@ -1,3 +1,4 @@
+import type { Capacidad, MedioDePago, Servicio } from '@tax/shared';
 import type {
   Driver,
   DriverStatus,
@@ -46,6 +47,8 @@ export interface ApiRide {
   passengers: number;
   /** Ausente si la API todavía no se ha actualizado: efectivo. */
   pagoElectronico?: boolean;
+  medioPago?: MedioDePago | null;
+  servicio?: Servicio | null;
   distanceKm: number | null;
   dropoffSource: 'cliente' | 'conductor' | null;
   pickupPhotoAt: string | null;
@@ -100,6 +103,7 @@ export interface ApiDriver {
   active: boolean;
   esPrueba?: boolean;
   aceptaPagoElectronico?: boolean;
+  capacidades?: Capacidad[];
   /** Solo mientras la suspensión sigue en pie. */
   suspendidoHasta?: string | null;
   motivoSuspension?: string | null;
@@ -182,6 +186,9 @@ export function toRide(row: ApiRide): Ride {
     vehicleType: row.vehicleType,
     passengers: row.passengers,
     pagoElectronico: row.pagoElectronico ?? false,
+    // De una API sin actualizar solo llega la marca de antes.
+    medioPago: row.medioPago ?? (row.pagoElectronico ? 'electronico' : 'efectivo'),
+    servicio: row.servicio ?? undefined,
     distanceKm: row.distanceKm ?? undefined,
     dropoffSource: row.dropoffSource ?? undefined,
     pickupPhotoAt: row.pickupPhotoAt ?? undefined,
@@ -240,6 +247,7 @@ export function toDriver(row: ApiDriver): Driver {
     active: row.active,
     esPrueba: row.esPrueba ?? false,
     aceptaPagoElectronico: row.aceptaPagoElectronico ?? false,
+    capacidades: row.capacidades ?? [],
     suspendidoHasta: row.suspendidoHasta ?? undefined,
     motivoSuspension: row.motivoSuspension ?? undefined,
     licenciaVence: row.licenseExpiresOn ?? undefined,

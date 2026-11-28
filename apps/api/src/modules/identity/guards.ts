@@ -1,3 +1,4 @@
+import { finDeSuspension } from '@tax/shared';
 import { CanActivate, ExecutionContext, Injectable, SetMetadata } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { FastifyRequest } from 'fastify';
@@ -115,7 +116,18 @@ export class DriverGuard implements CanActivate {
     }
 
     const driver = await this.identity.resolveDriverToken(header.slice(7));
-    if (!driver) throw new AppError('UNAUTHORIZED', 'Token inválido o dispositivo revocado');
+    if (!driver) {
+      // Sigue siendo un 401 —la aplicación ya sabe qué hacer con él—, pero
+      // con el motivo: «Está suspendido hasta…» empieza siempre igual, y por
+      // esas palabras lo reconocen la PWA y la app.
+      const hasta = await this.identity.suspensionDelToken(header.slice(7));
+      throw new AppError(
+        'UNAUTHORIZED',
+        hasta
+          ? `Está suspendido hasta el ${finDeSuspension(hasta)}. Al cumplirse la hora puede volver a entrar; para cualquier duda, llame a la oficina.`
+          : 'Token inválido o dispositivo revocado',
+      );
+    }
 
     request.driver = driver;
     return true;
